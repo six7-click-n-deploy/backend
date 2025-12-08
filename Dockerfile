@@ -1,32 +1,96 @@
+# ================================================================
+# Multi-Stage Dockerfile for Production
+# ================================================================
+
+# ----------------------------------------------------------------
+# Stage 1: Builder - Build Dependencies
+# ----------------------------------------------------------------
+FROM python:3.11-slim as builder
+
+# Set environment variables for build
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
+
+WORKDIR /build
+
+# Install system build dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    gcc \
+    g++ \
+    libpq-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy only dependency files first (for better caching)
+COPY pyproject.toml ./
+
+# Install Python dependencies
+RUN pip install --upgrade pip setuptools wheel && \
+    pip install --user --no-warn-script-location .
+
+# ----------------------------------------------------------------
+# Stage 2: Runtime - Production Image
+# ----------------------------------------------------------------
 FROM python:3.11-slim
 
-WORKDIR /app
+# Metadata
+LABEL maintainer="your.email@example.com" \
+      version="1.0.0" \
+      description="FastAPI Backend with Auth, Git & Celery"
 
-# System Dependencies
-RUN apt-get update && apt-get install -y \
-    gcc \
+# Create non-root user for security
+RUN groupadd -r appuser && useradd -r -g appuser appuser
+
+# Set environment variables
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONPATH=/app \
+    PATH=/home/appuser/.local/bin:$PATH \
+    APP_HOME=/app
+
+# Install runtime system dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
     openssh-client \
     postgresql-client \
+    curl \
+    ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-# Python Dependencies
-COPY requirements.txt .
-RUN pip install --no-cache-dir --upgrade pip && \
-    pip install --no-cache-dir -r requirements.txt
+# Create application directory
+WORKDIR $APP_HOME
 
-# Copy Application Code
-COPY ./app .
+# Copy Python dependencies from builder
+COPY --from=builder /root/.local /home/appuser/.local
 
-# Create directories for git repos
-RUN mkdir -p /tmp/repos
+# Copy application code
+COPY --chown=appuser:appuser . .
 
-# Expose Port
+# Make startup script executable
+RUN chmod +x start.sh
+
+# Create necessary directories with proper permissions
+RUN mkdir -p /tmp/repos && \
+    chown -R appuser:appuser /tmp/repos && \
+    chown -R appuser:appuser $APP_HOME
+
+# Switch to non-root user
+USER appuser
+
+# Expose application port
 EXPOSE 8000
 
-# Health Check
-HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-    CMD python -c "import requests; requests.get('http://localhost:8000/health')"
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \
+    CMD curl -f http://localhost:8000/health || exit 1
 
-# Run Application
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
+# Default environment variables (can be overridden)
+ENV DEBUG=False \
+    PORT=8000 \
+    HOST=0.0.0.0 \
+    WORKERS=4 \
+    LOG_LEVEL=info
+
+# Run startup script (migrations + uvicorn)
+CMD ["./start.sh"]

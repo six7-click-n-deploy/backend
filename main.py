@@ -11,9 +11,11 @@ from config import settings
 # ----------------------------------------------------------------
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Startup: Tabellen erstellen
-    Base.metadata.create_all(bind=engine)
-    print("✓ Database tables created")
+    # Startup: Database connection check
+    # Note: Tables are created via Alembic migrations
+    # Run: alembic upgrade head
+    print("✓ Application started")
+    print("ℹ️  Use 'alembic upgrade head' to apply database migrations")
     yield
     # Shutdown
     print("✓ Shutting down...")
