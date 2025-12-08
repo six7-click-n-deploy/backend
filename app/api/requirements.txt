@@ -14,3 +14,9 @@ redis
 kombu
 
 requests
+
+pytest
+pytest-asyncio
+httpx
+pytest-cov
+faker
