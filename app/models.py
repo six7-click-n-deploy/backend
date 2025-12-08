@@ -1,17 +1,37 @@
-from sqlalchemy import Column, Integer, String, DateTime, ForeignKey, Text, Enum
+from sqlalchemy import Column, String, DateTime, ForeignKey, Text, Enum, LargeBinary
+from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import relationship
 from datetime import datetime
 from app.database import Base
 import enum
+import uuid
 
 # ----------------------------------------------------------------
 # ENUMS
 # ----------------------------------------------------------------
-class TaskStatus(str, enum.Enum):
+class DeploymentStatus(str, enum.Enum):
     PENDING = "pending"
     RUNNING = "running"
     SUCCESS = "success"
     FAILED = "failed"
+
+class UserRole(str, enum.Enum):
+    STUDENT = "student"
+    TEACHER = "teacher"
+    ADMIN = "admin"
+
+# ----------------------------------------------------------------
+# COURSE MODEL
+# ----------------------------------------------------------------
+class Course(Base):
+    __tablename__ = "courses"
+    
+    courseId = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    name = Column(String, nullable=False)
+    
+    # Relationships
+    users = relationship("User", back_populates="course")
+    course_to_user_groups = relationship("CourseToUserGroup", back_populates="course")
 
 # ----------------------------------------------------------------
 # USER MODEL
@@ -19,50 +39,126 @@ class TaskStatus(str, enum.Enum):
 class User(Base):
     __tablename__ = "users"
     
-    id = Column(Integer, primary_key=True, index=True)
+    userId = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     email = Column(String, unique=True, index=True, nullable=False)
-    username = Column(String, unique=True, index=True, nullable=False)
-    hashed_password = Column(String, nullable=False)
+    username = Column(String, nullable=False)
+    password = Column(String, nullable=False)  # hashed password
+    role = Column(Enum(UserRole), nullable=False, default=UserRole.STUDENT)
+    courseId = Column(UUID(as_uuid=True), ForeignKey("courses.courseId"), nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     
     # Relationships
-    git_repos = relationship("GitRepository", back_populates="owner")
-    tasks = relationship("Task", back_populates="user")
+    course = relationship("Course", back_populates="users")
+    apps = relationship("App", back_populates="user")
+    deployments = relationship("Deployment", back_populates="user")
+    user_to_user_groups = relationship("UserToUserGroup", back_populates="user")
+    user_to_teams = relationship("UserToTeam", back_populates="user")
 
 # ----------------------------------------------------------------
-# GIT REPOSITORY MODEL
+# APP MODEL
 # ----------------------------------------------------------------
-class GitRepository(Base):
-    __tablename__ = "git_repositories"
+class App(Base):
+    __tablename__ = "apps"
     
-    id = Column(Integer, primary_key=True, index=True)
-    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    appId = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     name = Column(String, nullable=False)
-    url = Column(String, nullable=False)
-    branch = Column(String, default="main")
-    last_commit = Column(String, nullable=True)
-    last_cloned_at = Column(DateTime, nullable=True)
+    description = Column(String, nullable=True)
+    image = Column(LargeBinary, nullable=True)  # base64 als Binary speichern
+    git_link = Column(String, nullable=True)
+    userId = Column(UUID(as_uuid=True), ForeignKey("users.userId"), nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow)
     
     # Relationships
-    owner = relationship("User", back_populates="git_repos")
+    user = relationship("User", back_populates="apps")
+    deployments = relationship("Deployment", back_populates="app")
 
 # ----------------------------------------------------------------
-# TASK MODEL (für Celery Task Tracking)
+# DEPLOYMENT MODEL
 # ----------------------------------------------------------------
-class Task(Base):
-    __tablename__ = "tasks"
+class Deployment(Base):
+    __tablename__ = "deployments"
     
-    id = Column(Integer, primary_key=True, index=True)
-    celery_task_id = Column(String, unique=True, index=True, nullable=False)
-    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
-    task_type = Column(String, nullable=False)  # z.B. "git_clone", "terraform_apply"
-    status = Column(Enum(TaskStatus), default=TaskStatus.PENDING)
-    result = Column(Text, nullable=True)
-    error = Column(Text, nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    deploymentId = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    name = Column(String, nullable=False)
+    status = Column(Enum(DeploymentStatus), default=DeploymentStatus.PENDING)
+    commitHash = Column(String, nullable=True)
+    commitInfo = Column(Text, nullable=True)
+    userInputVar = Column(Text, nullable=True)  # könnte auch JSON sein
+    userId = Column(UUID(as_uuid=True), ForeignKey("users.userId"), nullable=False)
+    appId = Column(UUID(as_uuid=True), ForeignKey("apps.appId"), nullable=False)
     
     # Relationships
-    user = relationship("User", back_populates="tasks")
+    user = relationship("User", back_populates="deployments")
+    app = relationship("App", back_populates="deployments")
+    user_group = relationship("UserGroup", back_populates="deployment", uselist=False)
+
+# ----------------------------------------------------------------
+# USERGROUP MODEL
+# ----------------------------------------------------------------
+class UserGroup(Base):
+    __tablename__ = "user_groups"
+    
+    userGroupId = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    deploymentId = Column(UUID(as_uuid=True), ForeignKey("deployments.deploymentId"), unique=True, nullable=False)
+    
+    # Relationships
+    deployment = relationship("Deployment", back_populates="user_group")
+    user_to_user_groups = relationship("UserToUserGroup", back_populates="user_group")
+    course_to_user_groups = relationship("CourseToUserGroup", back_populates="user_group")
+    teams = relationship("Team", back_populates="user_group")
+
+# ----------------------------------------------------------------
+# USERTOUSERGROUP MODEL
+# ----------------------------------------------------------------
+class UserToUserGroup(Base):
+    __tablename__ = "user_to_user_groups"
+    
+    userToUserGroupId = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    userId = Column(UUID(as_uuid=True), ForeignKey("users.userId"), nullable=False)
+    userGroupId = Column(UUID(as_uuid=True), ForeignKey("user_groups.userGroupId"), nullable=False)
+    
+    # Relationships
+    user = relationship("User", back_populates="user_to_user_groups")
+    user_group = relationship("UserGroup", back_populates="user_to_user_groups")
+
+# ----------------------------------------------------------------
+# COURSETOUSERGROUP MODEL
+# ----------------------------------------------------------------
+class CourseToUserGroup(Base):
+    __tablename__ = "course_to_user_groups"
+    
+    courseToUserGroupID = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    courseId = Column(UUID(as_uuid=True), ForeignKey("courses.courseId"), nullable=False)
+    userGroupId = Column(UUID(as_uuid=True), ForeignKey("user_groups.userGroupId"), nullable=False)
+    
+    # Relationships
+    course = relationship("Course", back_populates="course_to_user_groups")
+    user_group = relationship("UserGroup", back_populates="course_to_user_groups")
+
+# ----------------------------------------------------------------
+# TEAM MODEL
+# ----------------------------------------------------------------
+class Team(Base):
+    __tablename__ = "teams"
+    
+    teamId = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    name = Column(String, nullable=False)
+    userGroupId = Column(UUID(as_uuid=True), ForeignKey("user_groups.userGroupId"), nullable=False)
+    
+    # Relationships
+    user_group = relationship("UserGroup", back_populates="teams")
+    user_to_teams = relationship("UserToTeam", back_populates="team")
+
+# ----------------------------------------------------------------
+# USERTOTEAM MODEL
+# ----------------------------------------------------------------
+class UserToTeam(Base):
+    __tablename__ = "user_to_teams"
+    
+    userToTeamId = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    userId = Column(UUID(as_uuid=True), ForeignKey("users.userId"), nullable=False)
+    teamId = Column(UUID(as_uuid=True), ForeignKey("teams.teamId"), nullable=False)
+    
+    # Relationships
+    user = relationship("User", back_populates="user_to_teams")
+    team = relationship("Team", back_populates="user_to_teams")
