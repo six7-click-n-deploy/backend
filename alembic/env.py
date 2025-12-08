@@ -16,8 +16,8 @@ if config.config_file_name is not None:
 # for 'autogenerate' support
 # from myapp import mymodel
 # target_metadata = mymodel.Base.metadata
-from database import Base
-from models import User, GitRepository, Task  # Import all models
+from app.database import Base
+from app.models import User, GitRepository, Task  # Import all models
 target_metadata = Base.metadata
 
 # other values from the config, defined by the needs of env.py,
@@ -26,7 +26,7 @@ target_metadata = Base.metadata
 # ... etc.
 
 # Import settings to get DATABASE_URL
-from config import settings
+from app.config import settings
 
 # Override the sqlalchemy.url in alembic.ini with the one from settings
 config.set_main_option("sqlalchemy.url", settings.DATABASE_URL)

@@ -15,7 +15,7 @@ echo "⏳ Waiting for database connection..."
 max_retries=30
 counter=0
 
-until python -c "from database import engine; engine.connect()" 2>/dev/null; do
+until python -c "from app.database import engine; engine.connect()" 2>/dev/null; do
     counter=$((counter+1))
     if [ $counter -gt $max_retries ]; then
         echo "❌ Failed to connect to database after $max_retries attempts"
@@ -43,7 +43,7 @@ echo "   Port: ${PORT:-8000}"
 echo "   Workers: ${WORKERS:-4}"
 echo "   Debug: ${DEBUG:-False}"
 
-exec uvicorn main:app \
+exec uvicorn app.main:app \
     --host "${HOST:-0.0.0.0}" \
     --port "${PORT:-8000}" \
     --workers "${WORKERS:-4}" \

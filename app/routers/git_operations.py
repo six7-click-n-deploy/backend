@@ -2,11 +2,11 @@ from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
 from sqlalchemy.orm import Session
 from typing import List
 
-from database import get_db
-from models import User, GitRepository
-from schemas import GitRepoCreate, GitRepoResponse, GitCloneRequest
-from utils.auth import get_current_user
-from services.git_service import git_service
+from app.database import get_db
+from app.models import User, GitRepository
+from app.schemas import GitRepoCreate, GitRepoResponse, GitCloneRequest
+from app.utils.auth import get_current_user
+from app.services.git_service import git_service
 
 router = APIRouter()
 

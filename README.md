@@ -30,17 +30,29 @@ See [`DEVELOPMENT.md`](DEVELOPMENT.md) for detailed development guide.
 
 ```
 backend/
-├── main.py                      # FastAPI Application Entry Point
-├── config.py                    # Settings & Environment Config
-├── database.py                  # Database Connection & Session
-├── models.py                    # SQLAlchemy Database Models
-├── schemas.py                   # Pydantic Schemas (Request/Response)
-├── pyproject.toml               # Project Configuration & Dependencies
-├── alembic.ini                  # Alembic Configuration
-├── Dockerfile                   # Docker Image Definition
-├── .env                         # Environment Variables (nicht committen!)
-├── .env.example                 # Environment Template
-├── .gitignore                   # Git Ignore File
+├── app/                         # FastAPI Application Package
+│   ├── __init__.py
+│   ├── main.py                  # FastAPI Application Entry Point
+│   ├── config.py                # Settings & Environment Config
+│   ├── database.py              # Database Connection & Session
+│   ├── models.py                # SQLAlchemy Database Models
+│   ├── schemas.py               # Pydantic Schemas (Request/Response)
+│   │
+│   ├── routers/                 # API Endpoints
+│   │   ├── __init__.py
+│   │   ├── auth.py              # Authentication (Register/Login)
+│   │   ├── users.py             # User Management
+│   │   ├── git_operations.py   # Git Repository Operations
+│   │   └── tasks.py             # Celery Task Management
+│   │
+│   ├── services/                # Business Logic Layer
+│   │   ├── __init__.py
+│   │   ├── git_service.py      # Git Clone/Pull/Info Operations
+│   │   └── celery_client.py    # Celery Client (Task Sender)
+│   │
+│   └── utils/                   # Utility Functions
+│       ├── __init__.py
+│       └── auth.py              # Auth Helpers (JWT, Password Hash)
 │
 ├── alembic/                     # Database Migrations
 │   ├── env.py                   # Alembic Environment
@@ -48,21 +60,14 @@ backend/
 │   ├── README.md                # Migration Documentation
 │   └── versions/                # Migration Files
 │
-├── routers/                     # API Endpoints
-│   ├── __init__.py
-│   ├── auth.py                  # Authentication (Register/Login)
-│   ├── users.py                 # User Management
-│   ├── git_operations.py        # Git Repository Operations
-│   └── tasks.py                 # Celery Task Management
-│
-├── services/                    # Business Logic Layer
-│   ├── __init__.py
-│   ├── git_service.py           # Git Clone/Pull/Info Operations
-│   └── celery_client.py         # Celery Client (Task Sender)
-│
-└── utils/                       # Utility Functions
-    ├── __init__.py
-    └── auth.py                  # Auth Helpers (JWT, Password Hash)
+├── pyproject.toml               # Project Configuration & Dependencies
+├── alembic.ini                  # Alembic Configuration
+├── Dockerfile                   # Production Docker Image
+├── Dockerfile.dev               # Development Docker Image
+├── start.sh                     # Production Startup Script
+├── migrate.py                   # Migration Helper Script
+├── .env.example                 # Environment Template
+└── .gitignore                   # Git Ignore File
 ```
 
 ## 🔧 Komponenten

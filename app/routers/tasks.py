@@ -2,11 +2,11 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from typing import List
 
-from database import get_db
-from models import User, Task, TaskStatus
-from schemas import TaskCreate, TaskResponse
-from utils.auth import get_current_user
-from services.celery_client import send_custom_task, get_task_status
+from app.database import get_db
+from app.models import User, Task, TaskStatus
+from app.schemas import TaskCreate, TaskResponse
+from app.utils.auth import get_current_user
+from app.services.celery_client import send_custom_task, get_task_status
 
 router = APIRouter()
 

@@ -67,33 +67,36 @@ uvicorn main:app --reload
 
 ```
 backend/
-├── main.py                    # FastAPI application
-├── config.py                  # Settings & environment
-├── database.py                # Database connection
-├── models.py                  # SQLAlchemy models
-├── schemas.py                 # Pydantic schemas
-├── Dockerfile                 # Production image
-├── Dockerfile.dev             # Development image
-├── start.sh                   # Production startup script
-├── pyproject.toml             # Dependencies & config
-├── alembic.ini               # Migration config
+├── app/                       # FastAPI Application Package
+│   ├── __init__.py
+│   ├── main.py               # FastAPI application
+│   ├── config.py             # Settings & environment
+│   ├── database.py           # Database connection
+│   ├── models.py             # SQLAlchemy models
+│   ├── schemas.py            # Pydantic schemas
+│   │
+│   ├── routers/              # API endpoints
+│   │   ├── auth.py          # Authentication
+│   │   ├── users.py         # User management
+│   │   ├── git_operations.py # Git operations
+│   │   └── tasks.py         # Task management
+│   │
+│   ├── services/            # Business logic
+│   │   ├── celery_client.py # Celery client
+│   │   └── git_service.py   # Git operations
+│   │
+│   └── utils/               # Utilities
+│       └── auth.py          # Auth helpers
 │
-├── alembic/                   # Database migrations
+├── alembic/                  # Database migrations
 │   ├── env.py
 │   └── versions/
 │
-├── routers/                   # API endpoints
-│   ├── auth.py               # Authentication
-│   ├── users.py              # User management
-│   ├── git_operations.py     # Git operations
-│   └── tasks.py              # Task management
-│
-├── services/                  # Business logic
-│   ├── celery_client.py      # Celery client
-│   └── git_service.py        # Git operations
-│
-└── utils/                     # Utilities
-    └── auth.py               # Auth helpers
+├── Dockerfile                # Production image
+├── Dockerfile.dev            # Development image
+├── start.sh                  # Production startup script
+├── pyproject.toml            # Dependencies & config
+└── alembic.ini              # Migration config
 ```
 
 ## 🗄️ Database Migrations
