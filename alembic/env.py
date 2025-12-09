@@ -17,7 +17,20 @@ if config.config_file_name is not None:
 # from myapp import mymodel
 # target_metadata = mymodel.Base.metadata
 from app.database import Base
-from app.models import User, GitRepository, Task  # Import all models
+
+# Import the models module so that all model classes are registered
+# on Base.metadata. Avoid importing specific model names here because
+# models may be renamed/removed; importing the module is more robust
+# for autogenerate.
+try:
+    import importlib
+
+    importlib.import_module("app.models")
+except Exception:
+    # If models cannot be imported here (e.g. during certain checks),
+    # we still set target_metadata to Base.metadata so offline mode can run.
+    pass
+
 target_metadata = Base.metadata
 
 # other values from the config, defined by the needs of env.py,

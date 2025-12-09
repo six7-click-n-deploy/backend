@@ -3,7 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 
 from app.database import engine, Base
-from app.routers import auth, tasks, git_operations, users
+from app.routers import auth, users
 from app.config import settings
 
 # ----------------------------------------------------------------
@@ -46,8 +46,6 @@ app.add_middleware(
 # ----------------------------------------------------------------
 app.include_router(auth.router, prefix="/auth", tags=["Authentication"])
 app.include_router(users.router, prefix="/users", tags=["Users"])
-app.include_router(tasks.router, prefix="/tasks", tags=["Tasks"])
-app.include_router(git_operations.router, prefix="/git", tags=["Git Operations"])
 
 # ----------------------------------------------------------------
 # HEALTH CHECK
