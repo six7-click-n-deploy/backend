@@ -15,25 +15,12 @@ class Settings(BaseSettings):
     ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 30
     
-    # Celery
-    CELERY_BROKER_URL: str
-    CELERY_RESULT_BACKEND: str
+    # Celery (optional - only needed for API runtime, not for migrations)
+    CELERY_BROKER_URL: str = "redis://localhost:6379/0"
+    CELERY_RESULT_BACKEND: str = "redis://localhost:6379/1"
     
     # CORS
     CORS_ORIGINS: List[str] = ["http://localhost:3000", "http://localhost:5173"]
-    
-    # Google OAuth (optional)
-    GOOGLE_CLIENT_ID: str = ""
-    GOOGLE_CLIENT_SECRET: str = ""
-    
-    # OpenStack (optional)
-    OS_AUTH_URL: str = ""
-    OS_PROJECT_ID: str = ""
-    OS_PROJECT_NAME: str = ""
-    OS_USER_DOMAIN_NAME: str = "Default"
-    OS_USERNAME: str = ""
-    OS_PASSWORD: str = ""
-    OS_REGION_NAME: str = ""
     
     class Config:
         env_file = ".env"

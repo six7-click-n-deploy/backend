@@ -67,9 +67,6 @@ COPY --from=builder /root/.local /home/appuser/.local
 # Copy application code
 COPY --chown=appuser:appuser . .
 
-# Make startup script executable
-RUN chmod +x start.sh
-
 # Create necessary directories with proper permissions
 RUN mkdir -p /tmp/repos && \
     chown -R appuser:appuser /tmp/repos && \
@@ -92,5 +89,5 @@ ENV DEBUG=False \
     WORKERS=4 \
     LOG_LEVEL=info
 
-# Run startup script (migrations + uvicorn)
-CMD ["./start.sh"]
+# Run uvicorn directly
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "4", "--proxy-headers", "--forwarded-allow-ips", "*"]
