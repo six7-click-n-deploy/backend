@@ -1,6 +1,7 @@
 from pydantic import BaseModel, EmailStr
 from datetime import datetime
 from typing import Optional
+from uuid import UUID
 
 # ----------------------------------------------------------------
 # USER SCHEMAS
@@ -17,7 +18,7 @@ class UserLogin(BaseModel):
     password: str
 
 class UserResponse(UserBase):
-    id: int
+    userId: UUID
     created_at: datetime
     
     class Config:
@@ -69,6 +70,42 @@ class TaskResponse(BaseModel):
     result: Optional[str] = None
     error: Optional[str] = None
     created_at: datetime
+    
+    class Config:
+        from_attributes = True
+
+# ----------------------------------------------------------------
+# APP SCHEMAS
+# ----------------------------------------------------------------
+class AppBase(BaseModel):
+    name: str
+    description: Optional[str] = None
+    git_link: Optional[str] = None
+
+class AppCreate(AppBase):
+    """Schema for creating a new app"""
+    image: Optional[bytes] = None  # Base64 decoded bytes
+
+class AppUpdate(BaseModel):
+    """Schema for updating an app - all fields optional"""
+    name: Optional[str] = None
+    description: Optional[str] = None
+    git_link: Optional[str] = None
+    image: Optional[bytes] = None
+
+class AppResponse(AppBase):
+    """Schema for app response"""
+    appId: UUID
+    userId: UUID
+    created_at: datetime
+    # Note: image excluded from list responses (too large)
+    
+    class Config:
+        from_attributes = True
+
+class AppDetailResponse(AppResponse):
+    """Schema for detailed app response including image"""
+    image: Optional[bytes] = None
     
     class Config:
         from_attributes = True

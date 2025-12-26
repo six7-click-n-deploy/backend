@@ -3,7 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 
 from app.database import engine, Base
-from app.routers import auth, users
+from app.routers import auth, users, apps
 from app.config import settings
 
 # ----------------------------------------------------------------
@@ -46,6 +46,7 @@ app.add_middleware(
 # ----------------------------------------------------------------
 app.include_router(auth.router, prefix="/auth", tags=["Authentication"])
 app.include_router(users.router, prefix="/users", tags=["Users"])
+app.include_router(apps.router, prefix="/apps", tags=["Apps"])
 
 # ----------------------------------------------------------------
 # HEALTH CHECK
