@@ -34,7 +34,7 @@ def register(user: UserCreate, db: Session = Depends(get_db)):
     new_user = User(
         email=user.email,
         username=user.username,
-        hashed_password=hashed_password
+        password=hashed_password
     )
     
     db.add(new_user)
