@@ -3,7 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 
 from app.database import engine, Base
-from app.routers import auth, users
+from app.routers import auth, users, courses, apps, deployments, user_groups, teams
 from app.config import settings
 
 # ----------------------------------------------------------------
@@ -46,6 +46,11 @@ app.add_middleware(
 # ----------------------------------------------------------------
 app.include_router(auth.router, prefix="/auth", tags=["Authentication"])
 app.include_router(users.router, prefix="/users", tags=["Users"])
+app.include_router(courses.router, prefix="/courses", tags=["Courses"])
+app.include_router(apps.router, prefix="/apps", tags=["Apps"])
+app.include_router(deployments.router, prefix="/deployments", tags=["Deployments"])
+app.include_router(user_groups.router, prefix="/user-groups", tags=["User Groups"])
+app.include_router(teams.router, prefix="/teams", tags=["Teams"])
 
 # ----------------------------------------------------------------
 # HEALTH CHECK
@@ -56,12 +61,4 @@ def health_check():
         "status": "healthy",
         "service": "backend-api",
         "version": "1.0.0"
-    }
-
-@app.get("/")
-def root():
-    return {
-        "message": "Backend API is running",
-        "docs": "/docs",
-        "health": "/health"
     }

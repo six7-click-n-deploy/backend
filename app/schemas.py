@@ -1,6 +1,8 @@
-from pydantic import BaseModel, EmailStr
+from pydantic import BaseModel, EmailStr, Field, ConfigDict
 from datetime import datetime
-from typing import Optional
+from typing import Optional, List
+from uuid import UUID
+from app.models import UserRole, DeploymentStatus
 
 # ----------------------------------------------------------------
 # USER SCHEMAS
@@ -11,17 +13,35 @@ class UserBase(BaseModel):
 
 class UserCreate(UserBase):
     password: str
+    role: UserRole = UserRole.STUDENT
+    courseId: Optional[UUID] = None
+
+class UserUpdate(BaseModel):
+    email: Optional[EmailStr] = None
+    username: Optional[str] = None
+    role: Optional[UserRole] = None
+    courseId: Optional[UUID] = None
+
+class UserPasswordUpdate(BaseModel):
+    current_password: str
+    new_password: str
 
 class UserLogin(BaseModel):
     username: str
     password: str
 
 class UserResponse(UserBase):
-    id: int
+    userId: UUID
+    role: UserRole
+    courseId: Optional[UUID] = None
     created_at: datetime
     
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
+
+class UserWithCourse(UserResponse):
+    course: Optional['CourseResponse'] = None
+    
+    model_config = ConfigDict(from_attributes=True)
 
 class Token(BaseModel):
     access_token: str
@@ -31,44 +51,147 @@ class TokenData(BaseModel):
     username: Optional[str] = None
 
 # ----------------------------------------------------------------
-# GIT REPOSITORY SCHEMAS
+# COURSE SCHEMAS
 # ----------------------------------------------------------------
-class GitRepoBase(BaseModel):
+class CourseBase(BaseModel):
     name: str
-    url: str
-    branch: str = "main"
 
-class GitRepoCreate(GitRepoBase):
+class CourseCreate(CourseBase):
     pass
 
-class GitRepoResponse(GitRepoBase):
-    id: int
-    user_id: int
-    last_commit: Optional[str] = None
-    last_cloned_at: Optional[datetime] = None
-    created_at: datetime
-    
-    class Config:
-        from_attributes = True
+class CourseUpdate(BaseModel):
+    name: Optional[str] = None
 
-class GitCloneRequest(BaseModel):
-    repo_id: int
+class CourseResponse(CourseBase):
+    courseId: UUID
+    
+    model_config = ConfigDict(from_attributes=True)
+
+class CourseWithUsers(CourseResponse):
+    users: List[UserResponse] = []
+    
+    model_config = ConfigDict(from_attributes=True)
 
 # ----------------------------------------------------------------
-# TASK SCHEMAS
+# APP SCHEMAS
 # ----------------------------------------------------------------
-class TaskCreate(BaseModel):
-    task_type: str
-    data: dict = {}
+class AppBase(BaseModel):
+    name: str
+    description: Optional[str] = None
+    git_link: Optional[str] = None
 
-class TaskResponse(BaseModel):
-    id: int
-    celery_task_id: str
-    task_type: str
-    status: str
-    result: Optional[str] = None
-    error: Optional[str] = None
+class AppCreate(AppBase):
+    pass
+
+class AppUpdate(BaseModel):
+    name: Optional[str] = None
+    description: Optional[str] = None
+    git_link: Optional[str] = None
+    image: Optional[bytes] = None
+
+class AppResponse(AppBase):
+    appId: UUID
+    userId: UUID
     created_at: datetime
     
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
+
+class AppWithUser(AppResponse):
+    user: UserResponse
+    
+    model_config = ConfigDict(from_attributes=True)
+
+# ----------------------------------------------------------------
+# DEPLOYMENT SCHEMAS
+# ----------------------------------------------------------------
+class DeploymentBase(BaseModel):
+    name: str
+    appId: UUID
+
+class DeploymentCreate(DeploymentBase):
+    commitHash: Optional[str] = None
+    commitInfo: Optional[str] = None
+    userInputVar: Optional[str] = None
+
+class DeploymentUpdate(BaseModel):
+    name: Optional[str] = None
+    status: Optional[DeploymentStatus] = None
+    commitHash: Optional[str] = None
+    commitInfo: Optional[str] = None
+    userInputVar: Optional[str] = None
+
+class DeploymentResponse(DeploymentBase):
+    deploymentId: UUID
+    userId: UUID
+    status: DeploymentStatus
+    commitHash: Optional[str] = None
+    commitInfo: Optional[str] = None
+    userInputVar: Optional[str] = None
+    
+    model_config = ConfigDict(from_attributes=True)
+
+class DeploymentWithRelations(DeploymentResponse):
+    user: UserResponse
+    app: AppResponse
+    
+    model_config = ConfigDict(from_attributes=True)
+
+# ----------------------------------------------------------------
+# USER GROUP SCHEMAS
+# ----------------------------------------------------------------
+class UserGroupBase(BaseModel):
+    deploymentId: UUID
+
+class UserGroupCreate(UserGroupBase):
+    userIds: List[UUID] = []
+    courseIds: List[UUID] = []
+
+class UserGroupResponse(UserGroupBase):
+    userGroupId: UUID
+    
+    model_config = ConfigDict(from_attributes=True)
+
+class UserGroupWithMembers(UserGroupResponse):
+    users: List[UserResponse] = []
+    courses: List[CourseResponse] = []
+    
+    model_config = ConfigDict(from_attributes=True)
+
+# ----------------------------------------------------------------
+# TEAM SCHEMAS
+# ----------------------------------------------------------------
+class TeamBase(BaseModel):
+    name: str
+    userGroupId: UUID
+
+class TeamCreate(TeamBase):
+    userIds: List[UUID] = []
+
+class TeamUpdate(BaseModel):
+    name: Optional[str] = None
+
+class TeamResponse(TeamBase):
+    teamId: UUID
+    
+    model_config = ConfigDict(from_attributes=True)
+
+class TeamWithMembers(TeamResponse):
+    users: List[UserResponse] = []
+    
+    model_config = ConfigDict(from_attributes=True)
+
+# ----------------------------------------------------------------
+# STATISTICS SCHEMAS
+# ----------------------------------------------------------------
+class UserStatistics(BaseModel):
+    total_apps: int
+    total_deployments: int
+    successful_deployments: int
+    failed_deployments: int
+    pending_deployments: int
+
+class CourseStatistics(BaseModel):
+    total_students: int
+    total_teachers: int
+    total_apps: int
+    total_deployments: int
