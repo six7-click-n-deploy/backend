@@ -22,12 +22,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libpq-dev \
     && rm -rf /var/lib/apt/lists/*
 
+
+# Install Poetry
+RUN curl -sSL https://install.python-poetry.org | python3 - && \
+    ln -s /root/.local/bin/poetry /usr/local/bin/poetry
+
 # Copy dependency files
 COPY pyproject.toml ./
 
-# Install Python dependencies (including dev dependencies)
-RUN pip install --upgrade pip setuptools wheel && \
-    pip install -e ".[dev]"
+# Install Python dependencies (ohne Projekt selbst)
+RUN poetry install --no-root --no-interaction --no-ansi
 
 # Copy application code
 COPY . .

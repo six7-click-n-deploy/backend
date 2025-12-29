@@ -2,9 +2,7 @@
 name = "backend-api"
 version = "1.0.0"
 description = "FastAPI Backend with Auth, Git & Celery Integration"
-readme = "README.md"
-requires-python = ">=3.11"
-license = {text = "Apache 2.0"}
+license = "Apache-2.0"
 authors = [
     "Your Name <your.email@example.com>"
 ]
@@ -19,7 +17,6 @@ classifiers = [
 ]
 homepage = "https://github.com/six7-click-n-deploy/backend"
 repository = "https://github.com/six7-click-n-deploy/backend"
-issues = "https://github.com/six7-click-n-deploy/backend/issues"
 
 [tool.poetry.dependencies]
 python = ">=3.11"
