@@ -2,7 +2,7 @@ from pydantic import BaseModel, EmailStr, Field, ConfigDict
 from datetime import datetime
 from typing import Optional, List
 from uuid import UUID
-from app.models import UserRole, DeploymentStatus
+from app.models import UserRole, DeploymentStatus, TaskType, TaskStatus
 
 # ----------------------------------------------------------------
 # USER SCHEMAS
@@ -109,8 +109,7 @@ class DeploymentBase(BaseModel):
     appId: UUID
 
 class DeploymentCreate(DeploymentBase):
-    commitHash: Optional[str] = None
-    commitInfo: Optional[str] = None
+    releaseTag: Optional[str] = None
     userInputVar: Optional[str] = None
 
 class DeploymentUpdate(BaseModel):
@@ -134,6 +133,37 @@ class DeploymentWithRelations(DeploymentResponse):
     user: UserResponse
     app: AppResponse
     
+    model_config = ConfigDict(from_attributes=True)
+
+# ----------------------------------------------------------------
+# Task SCHEMAS
+# ----------------------------------------------------------------
+class TaskBase(BaseModel):
+    deploymentId: UUID
+    celeryTaskId: str
+    type: TaskType
+    status: TaskStatus
+    started_at: Optional[datetime] = None
+    finished_at: Optional[datetime] = None
+    logs: Optional[str] = None
+    tf_state: Optional[str] = None
+    outputs: Optional[str] = None
+
+class TaskCreate(TaskBase):
+    pass
+
+class TaskUpdate(BaseModel):
+    status: Optional[TaskStatus] = None
+    started_at: Optional[datetime] = None
+    finished_at: Optional[datetime] = None
+    logs: Optional[str] = None
+    tf_state: Optional[str] = None
+    outputs: Optional[str] = None
+
+class TaskResponse(TaskBase):
+    taskId: UUID
+    created_at: datetime
+
     model_config = ConfigDict(from_attributes=True)
 
 # ----------------------------------------------------------------

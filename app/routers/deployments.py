@@ -2,13 +2,15 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 from typing import List, Optional
 from uuid import UUID
+import json
 
 from app.database import get_db
-from app.models import User, DeploymentStatus
+from app.models import TaskType, User, DeploymentStatus
 from app.schemas import DeploymentCreate, DeploymentUpdate, DeploymentResponse, DeploymentWithRelations
 from app.utils.auth import get_current_user
 from app.utils.permissions import ensure_resource_access
 from app.crud import deployments as crud_deployments
+from app.services.task_service import task_service
 
 router = APIRouter()
 
@@ -88,9 +90,33 @@ def create_deployment(
     - **All authenticated users** can create deployments
     - Deployment is initially set to PENDING status
     """
-    # TODO: Trigger Celery task for actual deployment
-    return crud_deployments.create_deployment(db, deployment, current_user.userId)
+    db_deployment = crud_deployments.create_deployment(db, deployment, current_user.userId)
 
+    try:
+        user_vars = json.loads(db_deployment.userInputVar) if db_deployment.userInputVar else {}
+    except Exception:
+        user_vars = {}
+
+    print(db_deployment.deploymentId)
+    print(db_deployment.app.git_link)
+    print(db_deployment.releaseTag)
+    print(user_vars)
+
+    task_service_result = task_service.start_and_register_task(
+        db=db,
+        deployment_id=db_deployment.deploymentId,
+        task_type=TaskType.DEPLOY,
+        celery_task_name="tasks.deploy_application",
+        celery_args=[
+            str(db_deployment.deploymentId),
+            db_deployment.app.git_link,
+            db_deployment.releaseTag,
+            user_vars
+        ],
+        queue=f"deployment-{db_deployment.deploymentId}",
+    )
+
+    return db_deployment
 
 # ----------------------------------------------------------------
 # UPDATE DEPLOYMENT

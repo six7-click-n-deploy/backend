@@ -95,8 +95,7 @@ class Deployment(Base):
     deploymentId = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     name = Column(String, nullable=False)
     status = Column(Enum(DeploymentStatus), default=DeploymentStatus.PENDING)
-    commitHash = Column(String, nullable=True)
-    commitInfo = Column(Text, nullable=True)
+    releaseTag = Column(String, nullable=True)
     userInputVar = Column(Text, nullable=True)  # könnte auch JSON sein
     userId = Column(UUID(as_uuid=True), ForeignKey("users.userId"), nullable=False)
     appId = Column(UUID(as_uuid=True), ForeignKey("apps.appId"), nullable=False)
@@ -106,6 +105,27 @@ class Deployment(Base):
     app = relationship("App", back_populates="deployments")
     user_group = relationship("UserGroup", back_populates="deployment", uselist=False)
 
+# ----------------------------------------------------------------
+# TASK MODEL
+# ----------------------------------------------------------------
+class Task(Base):
+    __tablename__ = "tasks"
+
+    taskId = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    deploymentId = Column(UUID(as_uuid=True), ForeignKey("deployments.deploymentId"), nullable=False)
+    celeryTaskId = Column(String, nullable=False)
+    type = Column(Enum(TaskType), nullable=False)
+    status = Column(Enum(TaskStatus), default=TaskStatus.PENDING)
+    started_at = Column(DateTime, nullable=True)
+    finished_at = Column(DateTime, nullable=True)
+    logs = Column(Text, nullable=True)  # JSON oder Text
+    tf_state = Column(Text, nullable=True)  # Terraform State als JSON/Text
+    outputs = Column(Text, nullable=True)  # Terraform Outputs als JSON/Text
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    # Relationships
+    deployment = relationship("Deployment", backref="tasks")
+    
 # ----------------------------------------------------------------
 # USERGROUP MODEL
 # ----------------------------------------------------------------
@@ -177,25 +197,3 @@ class UserToTeam(Base):
     user = relationship("User", back_populates="user_to_teams")
     team = relationship("Team", back_populates="user_to_teams")
 
-# ----------------------------------------------------------------
-# TASK MODEL
-# ----------------------------------------------------------------
-class Task(Base):
-    __tablename__ = "tasks"
-
-    taskId = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    deploymentId = Column(UUID(as_uuid=True), ForeignKey("deployments.deploymentId"), nullable=False)
-    celeryTaskId = Column(String, nullable=True, index=True)  # Celery AsyncResult ID
-    type = Column(Enum(TaskType), nullable=False)
-    status = Column(Enum(TaskStatus), default=TaskStatus.PENDING)
-    order = Column(String, nullable=True)  # z.B. "1", "2", "3" oder ein Zeitstempel
-    started_at = Column(DateTime, nullable=True)
-    finished_at = Column(DateTime, nullable=True)
-    logs = Column(Text, nullable=True)  # JSON oder Text
-    tf_state = Column(Text, nullable=True)  # Terraform State als JSON/Text
-    outputs = Column(Text, nullable=True)  # Terraform Outputs als JSON/Text
-    error = Column(Text, nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow)
-
-    # Relationships
-    deployment = relationship("Deployment", backref="tasks")

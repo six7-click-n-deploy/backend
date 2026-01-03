@@ -38,8 +38,7 @@ def create_deployment(db: Session, deployment: DeploymentCreate, user_id: UUID) 
         name=deployment.name,
         appId=deployment.appId,
         userId=user_id,
-        commitHash=deployment.commitHash,
-        commitInfo=deployment.commitInfo,
+        releaseTag=deployment.releaseTag,
         userInputVar=deployment.userInputVar,
         status=DeploymentStatus.PENDING
     )
