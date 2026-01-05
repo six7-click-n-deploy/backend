@@ -97,12 +97,8 @@ def create_deployment(
     except Exception:
         user_vars = {}
 
-    print(db_deployment.deploymentId)
-    print(db_deployment.app.git_link)
-    print(db_deployment.releaseTag)
-    print(user_vars)
-
-    task_service_result = task_service.start_and_register_task(
+    # Start deployment task
+    task, celery_task_id = task_service.start_and_register_task(
         db=db,
         deployment_id=db_deployment.deploymentId,
         task_type=TaskType.DEPLOY,
@@ -113,7 +109,6 @@ def create_deployment(
             db_deployment.releaseTag,
             user_vars
         ],
-        queue=f"deployment-{db_deployment.deploymentId}",
     )
 
     return db_deployment
