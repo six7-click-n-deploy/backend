@@ -3,8 +3,7 @@ from app.config import settings
 
 celery_app = Celery(
     "backend",
-    broker=settings.CELERY_BROKER_URL,
-    backend=settings.CELERY_RESULT_BACKEND
+    broker=settings.CELERY_BROKER_URL
 )
 
 celery_app.conf.update(

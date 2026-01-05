@@ -98,7 +98,7 @@ def create_deployment(
         user_vars = {}
 
     # Start deployment task
-    task, celery_task_id = task_service.start_and_register_task(
+    task, celery_task_id = task_service.register_new_task(
         db=db,
         deployment_id=db_deployment.deploymentId,
         task_type=TaskType.DEPLOY,

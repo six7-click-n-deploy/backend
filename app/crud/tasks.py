@@ -37,12 +37,18 @@ def create_task(db: Session, task: TaskCreate) -> Task:
     return db_task
 
 
-def update_task(db: Session, task_id: UUID, task_update: TaskUpdate) -> Optional[Task]:
+def update_task(db: Session, task_id: UUID, task_update) -> Optional[Task]:
     """Update task information"""
     db_task = get_task(db, task_id)
     if not db_task:
         return None
-    update_data = task_update.model_dump(exclude_unset=True)
+    
+    # Handle both dict and Pydantic model
+    if isinstance(task_update, dict):
+        update_data = task_update
+    else:
+        update_data = task_update.model_dump(exclude_unset=True)
+    
     for field, value in update_data.items():
         setattr(db_task, field, value)
     db.commit()

@@ -15,7 +15,6 @@ from app.models import User
 from app.schemas import TaskResponse
 from app.utils.auth import get_current_user
 from app.crud import tasks as crud_tasks
-from app.services.task_service import get_task_status
 
 router = APIRouter()
 
@@ -55,38 +54,3 @@ def get_task(
             detail="Task not found"
         )
     return task
-
-
-# ----------------------------------------------------------------
-# GET TASK STATUS FROM CELERY
-# ----------------------------------------------------------------
-@router.get("/{task_id}/status")
-def get_task_celery_status(
-    task_id: UUID,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
-):
-    """
-    Get real-time task status from Celery Result Backend
-    
-    Returns current state, progress, and logs from the running worker
-    """
-    # Get task from DB to get celeryTaskId
-    task = crud_tasks.get_task(db, task_id)
-    if not task:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Task not found"
-        )
-    
-    # Query Celery Result Backend for current status
-    celery_status = get_task_status(task.celeryTaskId)
-    
-    return {
-        "task_id": str(task.taskId),
-        "celery_task_id": task.celeryTaskId,
-        "deployment_id": str(task.deploymentId),
-        "type": task.type,
-        "db_status": task.status,
-        "celery_status": celery_status
-    }

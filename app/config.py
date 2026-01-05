@@ -17,7 +17,6 @@ class Settings(BaseSettings):
     
     # Celery (optional - only needed for API runtime, not for migrations)
     CELERY_BROKER_URL: str = "amqp://admin:admin@rabbitmq:5672/"
-    CELERY_RESULT_BACKEND: str = "redis://redis:6379/0"
     
     # CORS
     CORS_ORIGINS: List[str] = ["http://localhost:3000", "http://localhost:5173"]

@@ -11,7 +11,7 @@ logger = logging.getLogger(__name__)
 
 class TaskService:
     
-    def start_and_register_task(
+    def register_new_task(
         self,
         db: Session,
         deployment_id: uuid.UUID,
@@ -43,46 +43,6 @@ class TaskService:
         
         logger.info(f"Task {result.id} created for deployment {deployment_id}")
         return task, result.id
-    
-    def cancel_deployment_tasks(self, db: Session, deployment_id: uuid.UUID) -> int:
-        """Cancel active tasks for deployment"""
-        tasks = crud_tasks.get_tasks(db, deployment_id=deployment_id)
-        count = 0
-        
-        for task in tasks:
-            if task.status in [TaskStatus.PENDING, TaskStatus.RUNNING]:
-                celery_app.control.revoke(task.celeryTaskId, terminate=True)
-                crud_tasks.update_task(db, task.taskId, {"status": TaskStatus.CANCELLED})
-                count += 1
-        
-        return count
-
-
-def get_task_status(celery_task_id: str) -> dict:
-    """Get task status from Celery Result Backend"""
-    result = AsyncResult(celery_task_id, app=celery_app)
-    
-    return {
-        "task_id": celery_task_id,
-        "state": result.state,
-        "ready": result.ready(),
-        "info": result.info if result.state == "PROGRESS" else None,
-        "result": result.result if result.ready() else None,
-    }
-
-
-def map_celery_state_to_task_status(celery_state: str) -> TaskStatus:
-    """Map Celery state to TaskStatus enum"""
-    mapping = {
-        "PENDING": TaskStatus.PENDING,
-        "STARTED": TaskStatus.RUNNING,
-        "PROGRESS": TaskStatus.RUNNING,
-        "SUCCESS": TaskStatus.SUCCESS,
-        "FAILURE": TaskStatus.FAILED,
-        "REVOKED": TaskStatus.CANCELLED,
-    }
-    return mapping.get(celery_state, TaskStatus.PENDING)
-
 
 # Singleton instance
 task_service = TaskService()
