@@ -3,15 +3,17 @@
 # ================================================================
 
 # ----------------------------------------------------------------
-# Stage 1: Builder - Build Dependencies
+# Stage 1: Builder - Install Dependencies with Poetry
 # ----------------------------------------------------------------
-FROM python:3.11-slim as builder
+FROM python:3.11-slim AS builder
 
 # Set environment variables for build
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     PIP_NO_CACHE_DIR=1 \
-    PIP_DISABLE_PIP_VERSION_CHECK=1
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    POETRY_VIRTUALENVS_IN_PROJECT=true \
+    POETRY_NO_INTERACTION=1
 
 WORKDIR /build
 
@@ -20,14 +22,20 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc \
     g++ \
     libpq-dev \
+    curl \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy only dependency files first (for better caching)
-COPY pyproject.toml ./
+# Install Poetry
+RUN curl -sSL https://install.python-poetry.org | python3 - && \
+    ln -s /root/.local/bin/poetry /usr/local/bin/poetry
 
-# Install Python dependencies
-RUN pip install --upgrade pip setuptools wheel && \
-    pip install --user --no-warn-script-location .
+# Copy dependency files
+COPY pyproject.toml poetry.lock* ./
+
+# Install dependencies (ohne dev dependencies, ohne das Projekt selbst)
+# --only main installiert nur Produktions-Dependencies
+RUN poetry install --no-root --no-interaction --no-ansi --only main 2>/dev/null || \
+    poetry install --no-root --no-interaction --no-ansi
 
 # ----------------------------------------------------------------
 # Stage 2: Runtime - Production Image
@@ -46,7 +54,7 @@ RUN groupadd -r appuser && useradd -r -g appuser appuser
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONPATH=/app \
-    PATH=/home/appuser/.local/bin:$PATH \
+    PATH=/app/.venv/bin:$PATH \
     APP_HOME=/app
 
 # Install runtime system dependencies
@@ -61,8 +69,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Create application directory
 WORKDIR $APP_HOME
 
-# Copy Python dependencies from builder
-COPY --from=builder /root/.local /home/appuser/.local
+# Copy virtual environment from builder
+COPY --from=builder /build/.venv /app/.venv
 
 # Copy application code
 COPY --chown=appuser:appuser . .
