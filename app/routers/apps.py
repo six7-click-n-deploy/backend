@@ -2,13 +2,16 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 from typing import List, Optional, Any, Dict
 from uuid import UUID
+import os
+import re
 
 from app.database import get_db
 from app.models import User
-from app.schemas import AppCreate, AppUpdate, AppResponse, AppWithUser
+from app.schemas import AppCreate, AppUpdate, AppResponse, AppWithUser, AppWithVersions
 from app.utils.auth import get_current_user
 from app.utils.permissions import ensure_resource_access
 from app.crud import apps as crud_apps
+from app.services.git_service import git_service
 
 router = APIRouter()
 
@@ -45,13 +48,19 @@ def list_apps(
 # ----------------------------------------------------------------
 # GET APP BY ID
 # ----------------------------------------------------------------
-@router.get("/{app_id}", response_model=AppWithUser)
+@router.get("/{app_id}", response_model=AppWithVersions)
 def get_app(
     app_id: UUID,
+    refresh: bool = False,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-    """Get app by ID"""
+    """
+    Get app by ID with available versions
+    
+    Query Parameters:
+    - refresh: If true, bypass cache and fetch fresh versions from Git
+    """
     app = crud_apps.get_app(db, app_id)
     if not app:
         raise HTTPException(
@@ -61,6 +70,17 @@ def get_app(
     
     # Check access permission
     ensure_resource_access(app.userId, current_user)
+    
+    # Fetch versions if git_link exists
+    if app.git_link:
+        try:
+            app.versions = git_service.get_versions(app.git_link, refresh=refresh)
+        except Exception as e:
+            app.versions = []
+            import logging
+            logging.getLogger(__name__).warning(f"Could not fetch versions: {str(e)}")
+    else:
+        app.versions = []
     
     return app
 
@@ -101,6 +121,8 @@ def get_app_variables(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="App has no Git repository configured"
         )
+    
+    #TODO: Clone repo, checkout version, parse variables
 
 
 # ----------------------------------------------------------------

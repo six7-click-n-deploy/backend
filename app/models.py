@@ -39,7 +39,6 @@ class Course(Base):
     
     # Relationships
     users = relationship("User", back_populates="course")
-    course_to_user_groups = relationship("CourseToUserGroup", back_populates="course")
 
 # ----------------------------------------------------------------
 # USER MODEL
@@ -59,7 +58,7 @@ class User(Base):
     course = relationship("Course", back_populates="users")
     apps = relationship("App", back_populates="user")
     deployments = relationship("Deployment", back_populates="user")
-    user_to_user_groups = relationship("UserToUserGroup", back_populates="user")
+    user_to_deployments = relationship("UserToDeployment", back_populates="user")
     user_to_teams = relationship("UserToTeam", back_populates="user")
 
 # ----------------------------------------------------------------
@@ -96,7 +95,8 @@ class Deployment(Base):
     # Relationships
     user = relationship("User", back_populates="deployments")
     app = relationship("App", back_populates="deployments")
-    user_group = relationship("UserGroup", back_populates="deployment", uselist=False)
+    user_to_deployments = relationship("UserToDeployment", back_populates="deployment")
+    teams = relationship("Team", back_populates="deployment")
 
 # ----------------------------------------------------------------
 # TASK MODEL
