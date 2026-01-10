@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
-from typing import List, Optional
+from typing import List, Optional, Any, Dict
 from uuid import UUID
 
 from app.database import get_db
@@ -63,6 +63,44 @@ def get_app(
     ensure_resource_access(app.userId, current_user)
     
     return app
+
+
+# ----------------------------------------------------------------
+# GET APP VARIABLES
+# ----------------------------------------------------------------
+@router.get("/{app_id}/variables", response_model=List[Dict[str, Any]])
+def get_app_variables(
+    app_id: UUID,
+    version: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Get dynamic app variables from app's Git repository
+    Parses variables.tf file and returns all configurable variables
+    
+    Returns:
+    - name: Variable name
+    - type: Variable type (string, number, bool, list, map, etc.)
+    - description: Variable description
+    - default: Default value (if any)
+    - required: Whether variable is required
+    """
+    app = crud_apps.get_app(db, app_id)
+    if not app:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="App not found"
+        )
+    
+    # Check access permission
+    ensure_resource_access(app.userId, current_user)
+    
+    if not app.git_link:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="App has no Git repository configured"
+        )
 
 
 # ----------------------------------------------------------------

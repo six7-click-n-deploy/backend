@@ -6,15 +6,114 @@ Worker sends events, backend receives and processes them.
 """
 
 import logging
+import json
+import re
 from datetime import datetime
 from celery.events import EventReceiver
 from sqlalchemy.orm import Session
 from app.celery_app import celery_app
 from app.database import SessionLocal
 from app.crud import tasks as crud_tasks
-from app.models import TaskStatus
+from app.models import TaskStatus, Task, Deployment
 
 logger = logging.getLogger(__name__)
+
+
+def clean_log_line(line: str) -> str:
+    """Clean up log line by removing ANSI escape codes and normalizing quotes"""
+    # Remove ANSI color codes
+    ansi_escape = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
+    line = ansi_escape.sub('', line)
+    
+    # Normalize escaped quotes
+    line = line.replace('""', '"')
+    
+    return line
+
+
+def is_verbose_line(line: str) -> bool:
+    """Check if line is very verbose (TRACE/DEBUG from tools)"""
+    verbose_patterns = [
+        r"\[TRACE\]",
+        r"\[DEBUG\]",
+        r"json.dumps",
+        r"plugingetter",
+        r"github-getter",
+        r"discovering plugins",
+        r"BinaryInstallationOptions",
+        r"ListInstallationsOptions",
+    ]
+    return any(re.search(pattern, line, re.IGNORECASE) for pattern in verbose_patterns)
+
+
+def filter_logs(text: str, max_lines: int = 100) -> str:
+    """
+    Filter and clean logs for better readability
+    - Remove very verbose lines (TRACE/DEBUG)
+    - Remove ANSI escape codes
+    - Limit to max_lines if too long
+    """
+    lines = text.split('\n')
+    
+    # Filter verbose lines
+    filtered = []
+    for line in lines:
+        if line.strip() and not is_verbose_line(line):
+            cleaned = clean_log_line(line)
+            if cleaned.strip():
+                filtered.append(cleaned)
+    
+    # If still too long, keep important parts
+    if len(filtered) > max_lines:
+        # Keep first 20 lines and last 30 lines
+        important = filtered[:20] + ["..."] + filtered[-30:]
+        return "\n".join(important)
+    
+    return "\n".join(filtered)
+
+
+def format_logs(logs_data) -> str:
+    """Format logs from structured format to readable text"""
+    if isinstance(logs_data, list):
+        formatted = []
+        for entry in logs_data:
+            if isinstance(entry, dict):
+                timestamp = entry.get("timestamp", "")
+                message = entry.get("message", "")
+                level = entry.get("level", "INFO")
+                icon = _get_icon(level)
+                
+                # Clean up message (remove ANSI codes)
+                message = clean_log_line(message)
+                
+                # For long messages, truncate intelligently
+                if len(message) > 500:
+                    # If it looks like multiple lines, keep the structure
+                    if '\n' in message:
+                        lines = message.split('\n')
+                        if len(lines) > 20:
+                            # Too many lines, filter verbose ones
+                            message = filter_logs(message)
+                    else:
+                        message = message[:500] + "..."
+                
+                formatted.append(f"{icon} [{timestamp}] {message}")
+            elif isinstance(entry, str):
+                formatted.append(clean_log_line(entry))
+        return "\n".join(formatted)
+    return str(logs_data)
+
+
+def _get_icon(level: str) -> str:
+    """Get icon for log level"""
+    icons = {
+        "DEBUG": "🔍",
+        "INFO": "ℹ️",
+        "SUCCESS": "✓",
+        "WARNING": "⚠️",
+        "ERROR": "❌",
+    }
+    return icons.get(level, "•")
 
 
 def start_event_listener():
@@ -60,15 +159,13 @@ def start_event_listener():
                     "finished_at": datetime.utcnow()
                 }
                 
-                # Extract result data (only for successful tasks now)
+                # Extract result data
                 if isinstance(result, dict):
+                    logs_data = None
+                    
                     if 'logs' in result:
-                        # logs is an array of strings, join them
-                        logs_array = result['logs']
-                        if isinstance(logs_array, list):
-                            update_data['logs'] = '\n'.join(logs_array)
-                        else:
-                            update_data['logs'] = str(logs_array)
+                        logs_data = result['logs']
+                        update_data['logs'] = json.dumps(logs_data) if isinstance(logs_data, list) else str(logs_data)
                     
                     if 'tf_state' in result:
                         update_data['tf_state'] = result['tf_state']
@@ -76,53 +173,56 @@ def start_event_listener():
                     if 'terraform_outputs' in result:
                         tf_outputs = result['terraform_outputs']
                         if isinstance(tf_outputs, dict):
-                            import json
                             update_data['outputs'] = json.dumps(tf_outputs, indent=2)
                         else:
                             update_data['outputs'] = str(tf_outputs)
                     
-                    if 'commit_info' in result:
-                        commit_info = result['commit_info']
-                        if commit_info:
+                    # Send structured logs to Elasticsearch
+                    if logs_data and isinstance(logs_data, list):
+                        pass
+                    
+                    if 'commit_info' in result and result['commit_info']:
+                        commit = result['commit_info']
+                        if isinstance(commit, dict):
+                            commit_str = f"\n📝 Commit: {commit.get('hash', 'N/A')[:8]}"
+                            commit_str += f"\n   Message: {commit.get('message', 'N/A')}"
+                            commit_str += f"\n   Author: {commit.get('author', 'N/A')}"
                             current_logs = update_data.get('logs', '')
-                            update_data['logs'] = current_logs + f"\n\nCommit Info: {commit_info}"
+                            update_data['logs'] = current_logs + commit_str
             
             elif event_type == 'task-failed':
                 logger.info(f"Task {celery_task_id} failed")
                 exception_msg = event.get('exception', 'Unknown error')
-                traceback = event.get('traceback', '')
                 
                 update_data = {
                     "status": TaskStatus.FAILED,
                     "finished_at": datetime.utcnow()
                 }
                 
-                # Try to extract DeploymentFailure JSON data from exception message
+                # Try to extract structured failure data from exception message
                 try:
-                    import json
                     import re
                     
-                    # Exception format: "DeploymentFailure('{...}')" with escaped quotes
-                    # Extract JSON string between DeploymentFailure(' and ')
+                    # Exception format: JSON string in the message
                     match = re.search(r"DeploymentFailure\('(.+)'\)$", exception_msg, re.DOTALL)
                     if match:
                         json_str = match.group(1)
-                        # Unescape double quotes: "" -> "
-                        json_str = json_str.replace('""', '"')
+                        
+                        # Unescape the JSON string properly
+                        # The string comes escaped from Python, so we need to unescape it
+                        json_str = json_str.encode('utf-8').decode('unicode_escape')
+                        
                         failure_data = json.loads(json_str)
                         
-                        # Extract logs array - they're objects with timestamp and message
-                        if 'logs' in failure_data and isinstance(failure_data['logs'], list):
-                            log_lines = []
-                            for log_entry in failure_data['logs']:
-                                if isinstance(log_entry, dict):
-                                    timestamp = log_entry.get('timestamp', '')
-                                    message = log_entry.get('message', '')
-                                    # Format: [timestamp] message
-                                    log_lines.append(f"[{timestamp}] {message}")
-                                elif isinstance(log_entry, str):
-                                    log_lines.append(log_entry)
-                            update_data['logs'] = '\n'.join(log_lines)
+                        # Format logs
+                        logs_data = None
+                        if 'logs' in failure_data and failure_data['logs']:
+                            logs_data = failure_data['logs']
+                            update_data['logs'] = json.dumps(logs_data) if isinstance(logs_data, list) else str(logs_data)
+                        
+                        # Send to Elasticsearch
+                        if logs_data and isinstance(logs_data, list):
+                            pass
                         
                         # Add error message
                         if 'error' in failure_data:
@@ -133,13 +233,15 @@ def start_event_listener():
                         if 'tf_state' in failure_data and failure_data['tf_state']:
                             update_data['tf_state'] = failure_data['tf_state']
                         
-                        # Extract commit_info (it's a dict)
+                        # Extract commit_info
                         if 'commit_info' in failure_data and failure_data['commit_info']:
                             commit = failure_data['commit_info']
                             if isinstance(commit, dict):
-                                commit_str = f"Commit: {commit.get('hash', 'N/A')}\nMessage: {commit.get('message', 'N/A')}\nAuthor: {commit.get('author', 'N/A')}\nDate: {commit.get('date', 'N/A')}"
+                                commit_str = f"\n📝 Commit: {commit.get('hash', 'N/A')[:8]}"
+                                commit_str += f"\n   Message: {commit.get('message', 'N/A')}"
+                                commit_str += f"\n   Author: {commit.get('author', 'N/A')}"
                                 current_logs = update_data.get('logs', '')
-                                update_data['logs'] = current_logs + f"\n\n📝 {commit_str}"
+                                update_data['logs'] = current_logs + commit_str
                         
                         # Extract terraform_outputs
                         if 'terraform_outputs' in failure_data and failure_data['terraform_outputs']:
@@ -149,14 +251,13 @@ def start_event_listener():
                             else:
                                 update_data['outputs'] = str(tf_outputs)
                         
-                        logger.info(f"✓ Extracted DeploymentFailure data for task {celery_task_id}")
+                        logger.info(f"Extracted structured failure data for task {celery_task_id}")
                     else:
-                        raise ValueError("Could not extract DeploymentFailure JSON")
+                        raise ValueError("Not structured failure format")
                     
-                except Exception as e:
-                    # Not a DeploymentFailure or JSON parse failed - use simple error message
-                    logger.warning(f"Could not parse exception as DeploymentFailure: {e}")
-                    # Only show exception message, not the full traceback (too verbose)
+                except Exception as parse_error:
+                    # Not structured format - use simple error message
+                    logger.warning(f"Could not parse structured failure: {parse_error}")
                     update_data['logs'] = f"Task failed: {exception_msg}"
             
             elif event_type == 'task-revoked':

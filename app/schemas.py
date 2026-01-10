@@ -104,6 +104,10 @@ class AppWithUser(AppResponse):
 # ----------------------------------------------------------------
 # DEPLOYMENT SCHEMAS
 # ----------------------------------------------------------------
+class Team(BaseModel):
+    name: str
+    userIds: List[UUID] = []
+
 class DeploymentBase(BaseModel):
     name: str
     appId: UUID
@@ -111,20 +115,12 @@ class DeploymentBase(BaseModel):
 class DeploymentCreate(DeploymentBase):
     releaseTag: Optional[str] = None
     userInputVar: Optional[str] = None
-
-class DeploymentUpdate(BaseModel):
-    name: Optional[str] = None
-    status: Optional[DeploymentStatus] = None
-    commitHash: Optional[str] = None
-    commitInfo: Optional[str] = None
-    userInputVar: Optional[str] = None
+    teams: List[Team] = []
 
 class DeploymentResponse(DeploymentBase):
     deploymentId: UUID
     userId: UUID
     status: DeploymentStatus
-    commitHash: Optional[str] = None
-    commitInfo: Optional[str] = None
     userInputVar: Optional[str] = None
     
     model_config = ConfigDict(from_attributes=True)
