@@ -54,11 +54,14 @@ class GitService:
             with open(config_file, 'a') as f:
                 f.write('[core]\n')
                 f.write('\tsparseCheckout = true\n')
+
+            # Fetch the specific tag with correct refspec
+            logger.info(f"Fetching tag {tag} from remote...")
+            origin.fetch(refspec=f'refs/tags/{tag}:refs/tags/{tag}', depth=1)
             
-            # Fetch and checkout the tag
-            origin.fetch(tag, depth=1)
-            repo.heads.master.set_tracking_branch(origin.refs[tag])
-            repo.heads.master.checkout(force=True)
+            # Checkout the tag directly
+            logger.info(f"Checking out tag {tag}...")
+            repo.git.checkout(f'refs/tags/{tag}', force=True)
             
             logger.info(f"✓ Repository cloned successfully to {repo_path}")
             logger.info(f"Current HEAD: {repo.head.commit.hexsha}")
