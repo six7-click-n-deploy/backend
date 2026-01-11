@@ -76,11 +76,6 @@ class GitService:
             if os.path.exists(repo_path):
                 shutil.rmtree(repo_path)
             raise Exception(error_msg)
-
-    def cleanup_repository(self, repo_path: str) -> None:
-        """Löscht das geklonte Repo"""
-        if os.path.exists(repo_path):
-            shutil.rmtree(repo_path)
     
     def get_versions(self, git_url: str, refresh: bool = False) -> List[Dict[str, Any]]:
         """
@@ -160,5 +155,10 @@ class GitService:
             logger.exception(e)  # Log full traceback for debugging
             raise Exception(error_msg)
 
+    def cleanup_repository(self, repo_path: str) -> None:
+        """Löscht das geklonte Repo"""
+        if os.path.exists(repo_path):
+            shutil.rmtree(repo_path)
+            
 # Singleton
 git_service = GitService()
