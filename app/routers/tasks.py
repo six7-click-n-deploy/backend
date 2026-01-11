@@ -13,7 +13,7 @@ from uuid import UUID
 from app.database import get_db
 from app.models import User
 from app.schemas import TaskResponse
-from app.utils.auth import get_current_user
+from app.utils.keycloak_auth import get_current_user_keycloak
 from app.crud import tasks as crud_tasks
 
 router = APIRouter()
@@ -26,7 +26,7 @@ router = APIRouter()
 def get_deployment_tasks(
     deployment_id: UUID,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user_keycloak)
 ):
     """
     Get all tasks for a specific deployment
@@ -42,7 +42,7 @@ def get_deployment_tasks(
 def get_task(
     task_id: UUID,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user_keycloak)
 ):
     """
     Get task by ID

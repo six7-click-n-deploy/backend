@@ -6,7 +6,7 @@ from uuid import UUID
 from app.database import get_db
 from app.models import User
 from app.schemas import CourseCreate, CourseUpdate, CourseResponse, CourseWithUsers
-from app.utils.auth import get_current_user
+from app.utils.keycloak_auth import get_current_user_keycloak
 from app.utils.permissions import get_current_teacher_or_admin
 from app.crud import courses as crud_courses
 
@@ -21,7 +21,7 @@ def list_courses(
     skip: int = 0,
     limit: int = 100,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user_keycloak)
 ):
     """
     Get all courses
@@ -39,7 +39,7 @@ def list_courses(
 def get_course(
     course_id: UUID,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user_keycloak)
 ):
     """Get course by ID with all users"""
     course = crud_courses.get_course(db, course_id)

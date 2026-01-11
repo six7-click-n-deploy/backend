@@ -5,7 +5,7 @@ import logging
 import threading
 
 from app.database import engine, Base
-from app.routers import auth, users, courses, apps, deployments, teams, tasks
+from app.routers import auth_keycloak, users, courses, apps, deployments, teams, tasks
 from app.config import settings
 from app.services.celery_event_listener import start_event_listener
 
@@ -57,7 +57,7 @@ app.add_middleware(
 # ----------------------------------------------------------------
 # ROUTERS
 # ----------------------------------------------------------------
-app.include_router(auth.router, prefix="/auth", tags=["Authentication"])
+app.include_router(auth_keycloak.router, prefix="/auth", tags=["Authentication"])
 app.include_router(users.router, prefix="/users", tags=["Users"])
 app.include_router(courses.router, prefix="/courses", tags=["Courses"])
 app.include_router(apps.router, prefix="/apps", tags=["Apps"])

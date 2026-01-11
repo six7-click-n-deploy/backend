@@ -9,7 +9,7 @@ import logging
 from app.database import get_db
 from app.models import User
 from app.schemas import AppCreate, AppUpdate, AppResponse, AppWithUser, AppWithVersions
-from app.utils.auth import get_current_user
+from app.utils.keycloak_auth import get_current_user_keycloak
 from app.utils.permissions import ensure_resource_access
 from app.crud import apps as crud_apps
 from app.services.git_service import git_service
@@ -109,7 +109,7 @@ def list_apps(
     limit: int = 100,
     user_id: Optional[UUID] = None,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user_keycloak)
 ):
     """
     Get all apps with optional user filter
@@ -137,7 +137,7 @@ def get_app(
     app_id: UUID,
     refresh: bool = False,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user_keycloak)
 ):
     """
     Get app by ID with available versions
@@ -177,7 +177,7 @@ def get_app_variables(
     app_id: UUID,
     version: str,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user_keycloak)
 ):
     """
     Get dynamic app variables from app's Git repository
@@ -256,7 +256,7 @@ def get_app_variables(
 def create_app(
     app: AppCreate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user_keycloak)
 ):
     """
     Create a new app
@@ -273,7 +273,7 @@ def update_app(
     app_id: UUID,
     app_update: AppUpdate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user_keycloak)
 ):
     """
     Update an app
@@ -300,7 +300,7 @@ def update_app(
 def delete_app(
     app_id: UUID,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user_keycloak)
 ):
     """
     Delete an app

@@ -21,6 +21,13 @@ class Settings(BaseSettings):
     # Git
     TEMP_REPO_BASE_PATH: str = "/tmp/worker_repos"
     
+    # Keycloak
+    KEYCLOAK_SERVER_URL: str = "http://keycloak:8080"
+    KEYCLOAK_REALM: str = "dhbw"
+    KEYCLOAK_CLIENT_ID: str = "appstore-backend"
+    KEYCLOAK_CLIENT_SECRET: str = ""  # Set via environment variable
+    KEYCLOAK_ENABLED: bool = True  # Toggle for gradual migration
+    
     # CORS
     CORS_ORIGINS: List[str] = ["http://localhost:3000", "http://localhost:5173"]
     

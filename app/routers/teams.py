@@ -6,7 +6,7 @@ from uuid import UUID
 from app.database import get_db
 from app.models import User
 from app.schemas import TeamCreate, TeamUpdate, TeamResponse, TeamWithMembers
-from app.utils.auth import get_current_user
+from app.utils.keycloak_auth import get_current_user_keycloak
 from app.utils.permissions import get_current_teacher_or_admin
 from app.crud import teams as crud_teams
 
@@ -22,7 +22,7 @@ def list_teams(
     limit: int = 100,
     user_group_id: Optional[UUID] = None,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user_keycloak)
 ):
     """
     Get all teams with optional user group filter
@@ -39,7 +39,7 @@ def list_teams(
 def get_team(
     team_id: UUID,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user_keycloak)
 ):
     """Get team by ID with all members"""
     team = crud_teams.get_team(db, team_id)

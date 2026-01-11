@@ -7,7 +7,7 @@ import json
 from app.database import get_db
 from app.models import TaskType, User
 from app.schemas import DeploymentCreate, DeploymentResponse, DeploymentWithRelations
-from app.utils.auth import get_current_user
+from app.utils.keycloak_auth import get_current_user_keycloak
 from app.utils.permissions import ensure_resource_access
 from app.crud import deployments as crud_deployments
 from app.services.task_service import task_service
@@ -25,7 +25,7 @@ def list_deployments(
     user_id: Optional[UUID] = None,
     app_id: Optional[UUID] = None,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user_keycloak)
 ):
     """
     Get all deployments with optional filters
@@ -59,7 +59,7 @@ def list_deployments(
 def get_deployment(
     deployment_id: UUID,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user_keycloak)
 ):
     """Get deployment by ID with all relations"""
     deployment = crud_deployments.get_deployment(db, deployment_id)
@@ -82,7 +82,7 @@ def get_deployment(
 def create_deployment(
     deployment: DeploymentCreate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user_keycloak)
 ):
     """
     Create a new deployment
@@ -120,7 +120,7 @@ def create_deployment(
 def delete_deployment(
     deployment_id: UUID,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user_keycloak)
 ):
     """
     Delete a deployment
