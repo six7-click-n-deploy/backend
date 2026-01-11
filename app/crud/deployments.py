@@ -1,8 +1,8 @@
 from sqlalchemy.orm import Session
-from typing import List, Optional
+from typing import List, Optional, Set
 from uuid import UUID
 
-from app.models import Deployment
+from app.models import Deployment, UserToDeployment
 from app.schemas import DeploymentCreate
 
 
@@ -54,3 +54,24 @@ def delete_deployment(db: Session, deployment_id: UUID) -> bool:
     db.delete(db_deployment)
     db.commit()
     return True
+
+
+def create_user_to_deployments(
+    db: Session,
+    deployment_id: UUID,
+    user_ids: Set[UUID]
+) -> List[UserToDeployment]:
+    """
+    Create UserToDeployment entries for multiple users
+    """
+    user_to_deployments = []
+    
+    for user_id in user_ids:
+        user_to_deployment = UserToDeployment(
+            userId=user_id,
+            deploymentId=deployment_id
+        )
+        db.add(user_to_deployment)
+        user_to_deployments.append(user_to_deployment)
+    
+    return user_to_deployments

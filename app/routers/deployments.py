@@ -9,7 +9,7 @@ from app.models import TaskType, User
 from app.schemas import DeploymentCreate, DeploymentResponse, DeploymentWithRelations
 from app.utils.keycloak_auth import get_current_user_keycloak
 from app.utils.permissions import ensure_resource_access
-from app.crud import deployments as crud_deployments
+from app.crud import deployments as crud_deployments, teams as crud_teams
 from app.services.task_service import task_service
 
 router = APIRouter()
@@ -91,10 +91,53 @@ def create_deployment(
     """
     db_deployment = crud_deployments.create_deployment(db, deployment, current_user.userId)
 
+    # Create teams and collect all user IDs
+    user_ids_in_deployment = set()
+    
+    if deployment.teams:
+        teams_data = [
+            {"name": team.name, "userIds": team.userIds}
+            for team in deployment.teams
+        ]
+        crud_teams.create_teams_for_deployment(
+            db=db,
+            deployment_id=db_deployment.deploymentId,
+            teams_data=teams_data
+        )
+        
+        # Collect all user IDs from teams
+        for team in deployment.teams:
+            user_ids_in_deployment.update(team.userIds)
+    
+    # Create UserToDeployment entries
+    if user_ids_in_deployment:
+        crud_deployments.create_user_to_deployments(
+            db=db,
+            deployment_id=db_deployment.deploymentId,
+            user_ids=user_ids_in_deployment
+        )
+    
+    db.commit()
+    db.refresh(db_deployment)
+    
     try:
         user_vars = json.loads(db_deployment.userInputVar) if db_deployment.userInputVar else {}
     except Exception:
         user_vars = {}
+    
+    # Format teams for Terraform (team_name: [user_emails])
+    teams_dict = {}
+    if deployment.teams:
+        for team in deployment.teams:
+            # Get user emails from user IDs
+            from app.crud import users as crud_users
+            team_users = []
+            for user_id in team.userIds:
+                user = crud_users.get_user(db, user_id)
+                if user:
+                    team_users.append({"email": user.email})
+            
+            teams_dict[team.name] = team_users
 
     # Start deployment task
     task, celery_task_id = task_service.register_new_task(
@@ -106,7 +149,8 @@ def create_deployment(
             str(db_deployment.deploymentId),
             db_deployment.app.git_link,
             db_deployment.releaseTag,
-            user_vars
+            user_vars,
+            teams_dict  # Teams mit User-Emails
         ],
     )
 
