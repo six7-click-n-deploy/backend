@@ -1,8 +1,8 @@
 from pydantic import BaseModel, EmailStr, Field, ConfigDict
 from datetime import datetime
-from typing import Optional, List
+from typing import Optional, List, Dict, Any
 from uuid import UUID
-from app.models import UserRole, DeploymentStatus, TaskType, TaskStatus
+from app.models import UserRole, TaskType, TaskStatus
 
 # ----------------------------------------------------------------
 # USER SCHEMAS
@@ -101,9 +101,18 @@ class AppWithUser(AppResponse):
     
     model_config = ConfigDict(from_attributes=True)
 
+class AppWithVersions(AppWithUser):
+    versions: List[Dict[str, str]] = []
+    
+    model_config = ConfigDict(from_attributes=True)
+
 # ----------------------------------------------------------------
 # DEPLOYMENT SCHEMAS
 # ----------------------------------------------------------------
+class Team(BaseModel):
+    name: str
+    userIds: List[UUID] = []
+
 class DeploymentBase(BaseModel):
     name: str
     appId: UUID
@@ -111,20 +120,11 @@ class DeploymentBase(BaseModel):
 class DeploymentCreate(DeploymentBase):
     releaseTag: Optional[str] = None
     userInputVar: Optional[str] = None
-
-class DeploymentUpdate(BaseModel):
-    name: Optional[str] = None
-    status: Optional[DeploymentStatus] = None
-    commitHash: Optional[str] = None
-    commitInfo: Optional[str] = None
-    userInputVar: Optional[str] = None
+    teams: List[Team] = []
 
 class DeploymentResponse(DeploymentBase):
     deploymentId: UUID
     userId: UUID
-    status: DeploymentStatus
-    commitHash: Optional[str] = None
-    commitInfo: Optional[str] = None
     userInputVar: Optional[str] = None
     
     model_config = ConfigDict(from_attributes=True)

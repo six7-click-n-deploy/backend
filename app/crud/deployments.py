@@ -1,9 +1,9 @@
 from sqlalchemy.orm import Session
-from typing import List, Optional
+from typing import List, Optional, Set
 from uuid import UUID
 
-from app.models import Deployment, DeploymentStatus
-from app.schemas import DeploymentCreate, DeploymentUpdate
+from app.models import Deployment, UserToDeployment
+from app.schemas import DeploymentCreate
 
 
 def get_deployment(db: Session, deployment_id: UUID) -> Optional[Deployment]:
@@ -17,7 +17,6 @@ def get_deployments(
     limit: int = 100,
     user_id: Optional[UUID] = None,
     app_id: Optional[UUID] = None,
-    status: Optional[DeploymentStatus] = None
 ) -> List[Deployment]:
     """Get deployments with optional filters"""
     query = db.query(Deployment)
@@ -40,28 +39,11 @@ def create_deployment(db: Session, deployment: DeploymentCreate, user_id: UUID) 
         userId=user_id,
         releaseTag=deployment.releaseTag,
         userInputVar=deployment.userInputVar,
-        status=DeploymentStatus.PENDING
     )
     db.add(db_deployment)
     db.commit()
     db.refresh(db_deployment)
     return db_deployment
-
-
-def update_deployment(db: Session, deployment_id: UUID, deployment_update: DeploymentUpdate) -> Optional[Deployment]:
-    """Update deployment information"""
-    db_deployment = get_deployment(db, deployment_id)
-    if not db_deployment:
-        return None
-    
-    update_data = deployment_update.model_dump(exclude_unset=True)
-    for field, value in update_data.items():
-        setattr(db_deployment, field, value)
-    
-    db.commit()
-    db.refresh(db_deployment)
-    return db_deployment
-
 
 def delete_deployment(db: Session, deployment_id: UUID) -> bool:
     """Delete a deployment"""
@@ -74,13 +56,22 @@ def delete_deployment(db: Session, deployment_id: UUID) -> bool:
     return True
 
 
-def update_deployment_status(db: Session, deployment_id: UUID, status: DeploymentStatus) -> Optional[Deployment]:
-    """Update deployment status"""
-    db_deployment = get_deployment(db, deployment_id)
-    if not db_deployment:
-        return None
+def create_user_to_deployments(
+    db: Session,
+    deployment_id: UUID,
+    user_ids: Set[UUID]
+) -> List[UserToDeployment]:
+    """
+    Create UserToDeployment entries for multiple users
+    """
+    user_to_deployments = []
     
-    db_deployment.status = status
-    db.commit()
-    db.refresh(db_deployment)
-    return db_deployment
+    for user_id in user_ids:
+        user_to_deployment = UserToDeployment(
+            userId=user_id,
+            deploymentId=deployment_id
+        )
+        db.add(user_to_deployment)
+        user_to_deployments.append(user_to_deployment)
+    
+    return user_to_deployments

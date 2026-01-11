@@ -1,155 +1,167 @@
-import git
-from pathlib import Path
+import os
 import shutil
-from typing import Dict, Optional
-from datetime import datetime
+import logging
+from typing import Optional, List, Dict, Any
+import git
+from ..config import settings
+import time
+
+logger = logging.getLogger(__name__)
 
 class GitService:
-    """Service for Git operations"""
-    
-    def __init__(self, base_dir: str = "/tmp/repos"):
-        self.base_dir = Path(base_dir)
-        self.base_dir.mkdir(parents=True, exist_ok=True)
-    
-    def clone_repository(
-        self,
-        repo_url: str,
-        branch: str = "main",
-        repo_id: Optional[int] = None,
-        depth: int = 1
-    ) -> Dict:
+    def __init__(self):
+        self.base_path = settings.TEMP_REPO_BASE_PATH
+        self._version_cache = {}  # {git_url: (versions, timestamp)}
+        self._cache_ttl = 3600  # 1 hour cache
+
+    def clone_release_vars(self, git_url: str, tag: str, deployment_id: str) -> str:
         """
-        Clone a git repository
+        Klone nur bestimmte Dateien (variables.tf und variables.pkr.hcl) mit Sparse-Checkout.
+        Args:
+            git_url: URL des Git-Repos
+            tag: Tag/Release-Name
+            deployment_id: Eindeutige ID für den Zielordner
+        Returns:
+            Pfad zum geklonten Repo
+        Raises:
+            Exception with detailed error message
+        """
+        repo_path = os.path.join(self.base_path, f"deploy_{deployment_id}")
+        if os.path.exists(repo_path):
+            logger.info(f"Removing existing repo at {repo_path}")
+            shutil.rmtree(repo_path)
+        try:
+            logger.info(f"Cloning repository {git_url}")
+            logger.info(f"Target: {repo_path}")
+            logger.info(f"Branch/Tag: {tag}")
+            logger.info(f"Mode: Sparse checkout (only variables files)")
+            
+            # Initialize repo with sparse-checkout
+            repo = git.Repo.init(repo_path)
+            origin = repo.create_remote('origin', git_url)
+            
+            # Configure sparse checkout to only get specific files
+            git_dir = os.path.join(repo_path, '.git')
+            sparse_checkout_file = os.path.join(git_dir, 'info', 'sparse-checkout')
+            
+            os.makedirs(os.path.dirname(sparse_checkout_file), exist_ok=True)
+            with open(sparse_checkout_file, 'w') as f:
+                f.write('terraform/variables.tf\n')
+                f.write('packer/variables.pkr.hcl\n')
+            
+            # Enable sparse checkout
+            config_file = os.path.join(git_dir, 'config')
+            with open(config_file, 'a') as f:
+                f.write('[core]\n')
+                f.write('\tsparseCheckout = true\n')
+
+            # Fetch the specific tag with correct refspec
+            logger.info(f"Fetching tag {tag} from remote...")
+            origin.fetch(refspec=f'refs/tags/{tag}:refs/tags/{tag}', depth=1)
+            
+            # Checkout the tag directly
+            logger.info(f"Checking out tag {tag}...")
+            repo.git.checkout(f'refs/tags/{tag}', force=True)
+            
+            logger.info(f"✓ Repository cloned successfully to {repo_path}")
+            logger.info(f"Current HEAD: {repo.head.commit.hexsha}")
+            
+            return repo_path
+        except git.exc.GitCommandError as e:
+            error_msg = f"Git command failed: {e.stderr if hasattr(e, 'stderr') else str(e)}"
+            logger.error(error_msg)
+            if os.path.exists(repo_path):
+                shutil.rmtree(repo_path)
+            raise Exception(error_msg)
+        except Exception as e:
+            error_msg = f"Failed to clone release {tag} from {git_url}: {str(e)}"
+            logger.error(error_msg)
+            if os.path.exists(repo_path):
+                shutil.rmtree(repo_path)
+            raise Exception(error_msg)
+    
+    def get_versions(self, git_url: str, refresh: bool = False) -> List[Dict[str, Any]]:
+        """
+        Hole alle verfügbaren Versionen (Tags) eines Git-Repos via ls-remote
+        Nutzt Caching um wiederholte Requests zu beschleunigen
         
         Args:
-            repo_url: Git repository URL
-            branch: Branch to clone
-            repo_id: Optional repository ID for directory naming
-            depth: Clone depth (1 for shallow clone)
-            
+            git_url: URL des Git-Repos
+            refresh: Wenn True, Cache ignorieren und neu fetchen
         Returns:
-            Dictionary with clone information
+            Liste von Versionen mit Name, Commit-SHA und Type
+        Raises:
+            Exception with detailed error message
         """
+        # Check Cache (außer wenn refresh=True)
+        if not refresh and git_url in self._version_cache:
+            versions, timestamp = self._version_cache[git_url]
+            if time.time() - timestamp < self._cache_ttl:
+                age = int(time.time() - timestamp)
+                logger.info(f"✓ Using cached versions for {git_url} (age: {age}s, TTL: {self._cache_ttl}s)")
+                return versions
+        
         try:
-            # Create unique directory
-            if repo_id:
-                repo_dir = self.base_dir / f"repo_{repo_id}"
-            else:
-                timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
-                repo_dir = self.base_dir / f"repo_{timestamp}"
+            logger.info(f"Fetching versions from {git_url}")
             
-            # Remove if exists
-            if repo_dir.exists():
-                shutil.rmtree(repo_dir)
+            # Nutze git ls-remote um alle Tags zu holen (schneller & zuverlässiger)
+            git_cmd = git.cmd.Git()
+            refs = git_cmd.ls_remote('--tags', git_url)
             
-            repo_dir.mkdir(parents=True, exist_ok=True)
+            versions = []
+            seen_tags = set()
             
-            # Clone repository
-            repo = git.Repo.clone_from(
-                repo_url,
-                repo_dir,
-                branch=branch,
-                depth=depth
-            )
+            # Parse ls-remote output
+            for line in refs.split('\n'):
+                if not line.strip():
+                    continue
+                
+                parts = line.split()
+                if len(parts) < 2:
+                    continue
+                
+                commit = parts[0][:8]
+                ref_path = parts[1]
+                
+                # Filter nur Tags (nicht commit-refs like ^{})
+                if 'refs/tags/' in ref_path and not ref_path.endswith('^{}'):
+                    tag_name = ref_path.replace('refs/tags/', '')
+                    
+                    # Duplikate vermeiden
+                    if tag_name not in seen_tags:
+                        seen_tags.add(tag_name)
+                        versions.append({
+                            "version": tag_name,
+                            "commit": commit,
+                            "type": "tag"
+                        })
             
-            # Get repository information
-            commit = repo.head.commit
+            # Sortiere Versionen (neueste zuerst)
+            try:
+                versions.sort(
+                    key=lambda x: tuple(map(int, x['version'].lstrip('v').split('.'))),
+                    reverse=True
+                )
+            except (ValueError, AttributeError):
+                # Falls nicht als Versionen parsbar, alphabetisch sortieren
+                versions.sort(key=lambda x: x['version'], reverse=True)
             
-            # Count files
-            files_count = len(list(repo_dir.rglob("*")))
+            # Cache speichern
+            self._version_cache[git_url] = (versions, time.time())
             
-            return {
-                "success": True,
-                "repo_url": repo_url,
-                "branch": branch,
-                "commit_hash": commit.hexsha,
-                "commit_short": commit.hexsha[:7],
-                "commit_message": commit.message.strip(),
-                "commit_author": str(commit.author),
-                "commit_date": commit.committed_datetime.isoformat(),
-                "files_count": files_count,
-                "repo_path": str(repo_dir),
-                "cloned_at": datetime.utcnow().isoformat()
-            }
-            
-        except git.GitCommandError as e:
-            return {
-                "success": False,
-                "error": f"Git error: {str(e)}",
-                "repo_url": repo_url,
-                "branch": branch
-            }
+            logger.info(f"✓ Found {len(versions)} versions: {[v['version'] for v in versions]}")
+            return versions
+        
         except Exception as e:
-            return {
-                "success": False,
-                "error": f"Unexpected error: {str(e)}",
-                "repo_url": repo_url,
-                "branch": branch
-            }
-    
-    def get_repository_info(self, repo_path: str) -> Dict:
-        """Get information about a local repository"""
-        try:
-            repo = git.Repo(repo_path)
-            commit = repo.head.commit
-            
-            return {
-                "success": True,
-                "commit_hash": commit.hexsha,
-                "commit_short": commit.hexsha[:7],
-                "commit_message": commit.message.strip(),
-                "commit_author": str(commit.author),
-                "commit_date": commit.committed_datetime.isoformat(),
-                "branch": repo.active_branch.name,
-                "remotes": [remote.name for remote in repo.remotes],
-            }
-        except Exception as e:
-            return {
-                "success": False,
-                "error": str(e)
-            }
-    
-    def pull_repository(self, repo_path: str) -> Dict:
-        """Pull latest changes from remote"""
-        try:
-            repo = git.Repo(repo_path)
-            origin = repo.remotes.origin
-            origin.pull()
-            
-            commit = repo.head.commit
-            
-            return {
-                "success": True,
-                "message": "Repository updated successfully",
-                "commit_hash": commit.hexsha,
-                "commit_short": commit.hexsha[:7]
-            }
-        except Exception as e:
-            return {
-                "success": False,
-                "error": str(e)
-            }
-    
-    def cleanup_repository(self, repo_path: str) -> Dict:
-        """Remove a cloned repository"""
-        try:
-            path = Path(repo_path)
-            if path.exists():
-                shutil.rmtree(path)
-                return {
-                    "success": True,
-                    "message": f"Repository removed: {repo_path}"
-                }
-            else:
-                return {
-                    "success": False,
-                    "error": "Repository path does not exist"
-                }
-        except Exception as e:
-            return {
-                "success": False,
-                "error": str(e)
-            }
+            error_msg = f"Failed to fetch versions from {git_url}: {str(e)}"
+            logger.error(error_msg)
+            logger.exception(e)  # Log full traceback for debugging
+            raise Exception(error_msg)
 
-# Singleton instance
+    def cleanup_repository(self, repo_path: str) -> None:
+        """Löscht das geklonte Repo"""
+        if os.path.exists(repo_path):
+            shutil.rmtree(repo_path)
+            
+# Singleton
 git_service = GitService()

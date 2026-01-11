@@ -108,3 +108,36 @@ def remove_user_from_team(db: Session, team_id: UUID, user_id: UUID) -> bool:
     db.delete(user_to_team)
     db.commit()
     return True
+
+
+def create_teams_for_deployment(
+    db: Session,
+    deployment_id: UUID,
+    teams_data: List[dict]
+) -> List[Team]:
+    """
+    Create multiple teams for a deployment
+    teams_data format: [{"name": "team1", "userIds": [uuid1, uuid2]}, ...]
+    """
+    created_teams = []
+    
+    for team_data in teams_data:
+        # Create team
+        db_team = Team(
+            name=team_data["name"],
+            deploymentId=deployment_id
+        )
+        db.add(db_team)
+        db.flush()  # Get team ID
+        
+        # Add users to team
+        for user_id in team_data.get("userIds", []):
+            user_to_team = UserToTeam(
+                userId=user_id,
+                teamId=db_team.teamId
+            )
+            db.add(user_to_team)
+        
+        created_teams.append(db_team)
+    
+    return created_teams

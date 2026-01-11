@@ -9,7 +9,8 @@ from app.schemas import (
     UserResponse, UserWithCourse, UserUpdate, UserPasswordUpdate,
     UserStatistics
 )
-from app.utils.auth import get_current_user, verify_password
+from app.utils.keycloak_auth import get_current_user_keycloak
+from app.utils.auth import verify_password
 from app.utils.permissions import get_current_admin, get_current_teacher_or_admin, ensure_resource_access
 from app.crud import users as crud_users
 from app.crud import apps as crud_apps
@@ -21,7 +22,7 @@ router = APIRouter()
 # GET CURRENT USER
 # ----------------------------------------------------------------
 @router.get("/me", response_model=UserWithCourse)
-def get_me(current_user: User = Depends(get_current_user)):
+def get_me(current_user: User = Depends(get_current_user_keycloak)):
     """Get current authenticated user with course information"""
     return current_user
 
@@ -52,7 +53,7 @@ def search_users(
     query: str,
     limit: int = 10,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user_keycloak)
 ):
     """
     Search users by username or email
@@ -68,7 +69,7 @@ def search_users(
 def get_user(
     user_id: UUID,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user_keycloak)
 ):
     """
     Get user by ID
@@ -98,7 +99,7 @@ def get_user(
 def get_user_statistics(
     user_id: UUID,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user_keycloak)
 ):
     """
     Get user statistics
@@ -134,7 +135,7 @@ def update_user(
     user_id: UUID,
     user_update: UserUpdate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user_keycloak)
 ):
     """
     Update user information
@@ -173,7 +174,7 @@ def change_password(
     user_id: UUID,
     password_update: UserPasswordUpdate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user_keycloak)
 ):
     """
     Change user password

@@ -9,12 +9,6 @@ import uuid
 # ----------------------------------------------------------------
 # ENUMS
 # ----------------------------------------------------------------
-class DeploymentStatus(str, enum.Enum):
-    PENDING = "pending"
-    RUNNING = "running"
-    SUCCESS = "success"
-    FAILED = "failed"
-
 class UserRole(str, enum.Enum):
     STUDENT = "student"
     TEACHER = "teacher"
@@ -45,7 +39,6 @@ class Course(Base):
     
     # Relationships
     users = relationship("User", back_populates="course")
-    course_to_user_groups = relationship("CourseToUserGroup", back_populates="course")
 
 # ----------------------------------------------------------------
 # USER MODEL
@@ -54,9 +47,10 @@ class User(Base):
     __tablename__ = "users"
     
     userId = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    keycloak_id = Column(String, unique=True, index=True, nullable=True)  # Keycloak User ID (sub)
     email = Column(String, unique=True, index=True, nullable=False)
     username = Column(String, nullable=False)
-    password = Column(String, nullable=False)  # hashed password
+    password = Column(String, nullable=True)  # Legacy - wird nach Migration entfernt
     role = Column(Enum(UserRole), nullable=False, default=UserRole.STUDENT)
     courseId = Column(UUID(as_uuid=True), ForeignKey("courses.courseId"), nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
@@ -65,7 +59,7 @@ class User(Base):
     course = relationship("Course", back_populates="users")
     apps = relationship("App", back_populates="user")
     deployments = relationship("Deployment", back_populates="user")
-    user_to_user_groups = relationship("UserToUserGroup", back_populates="user")
+    user_to_deployments = relationship("UserToDeployment", back_populates="user")
     user_to_teams = relationship("UserToTeam", back_populates="user")
 
 # ----------------------------------------------------------------
@@ -94,7 +88,6 @@ class Deployment(Base):
     
     deploymentId = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     name = Column(String, nullable=False)
-    status = Column(Enum(DeploymentStatus), default=DeploymentStatus.PENDING)
     releaseTag = Column(String, nullable=True)
     userInputVar = Column(Text, nullable=True)  # könnte auch JSON sein
     userId = Column(UUID(as_uuid=True), ForeignKey("users.userId"), nullable=False)
@@ -103,7 +96,8 @@ class Deployment(Base):
     # Relationships
     user = relationship("User", back_populates="deployments")
     app = relationship("App", back_populates="deployments")
-    user_group = relationship("UserGroup", back_populates="deployment", uselist=False)
+    user_to_deployments = relationship("UserToDeployment", back_populates="deployment")
+    teams = relationship("Team", back_populates="deployment")
 
 # ----------------------------------------------------------------
 # TASK MODEL
@@ -127,47 +121,18 @@ class Task(Base):
     deployment = relationship("Deployment", backref="tasks")
     
 # ----------------------------------------------------------------
-# USERGROUP MODEL
+# USERTODEPLOYMENT MODEL
 # ----------------------------------------------------------------
-class UserGroup(Base):
-    __tablename__ = "user_groups"
+class UserToDeployment(Base):
+    __tablename__ = "user_to_deployments"
     
-    userGroupId = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    deploymentId = Column(UUID(as_uuid=True), ForeignKey("deployments.deploymentId"), unique=True, nullable=False)
-    
-    # Relationships
-    deployment = relationship("Deployment", back_populates="user_group")
-    user_to_user_groups = relationship("UserToUserGroup", back_populates="user_group")
-    course_to_user_groups = relationship("CourseToUserGroup", back_populates="user_group")
-    teams = relationship("Team", back_populates="user_group")
-
-# ----------------------------------------------------------------
-# USERTOUSERGROUP MODEL
-# ----------------------------------------------------------------
-class UserToUserGroup(Base):
-    __tablename__ = "user_to_user_groups"
-    
-    userToUserGroupId = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    userToDeploymentId = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     userId = Column(UUID(as_uuid=True), ForeignKey("users.userId"), nullable=False)
-    userGroupId = Column(UUID(as_uuid=True), ForeignKey("user_groups.userGroupId"), nullable=False)
+    deploymentId = Column(UUID(as_uuid=True), ForeignKey("deployments.deploymentId"), nullable=False)
     
     # Relationships
-    user = relationship("User", back_populates="user_to_user_groups")
-    user_group = relationship("UserGroup", back_populates="user_to_user_groups")
-
-# ----------------------------------------------------------------
-# COURSETOUSERGROUP MODEL
-# ----------------------------------------------------------------
-class CourseToUserGroup(Base):
-    __tablename__ = "course_to_user_groups"
-    
-    courseToUserGroupID = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    courseId = Column(UUID(as_uuid=True), ForeignKey("courses.courseId"), nullable=False)
-    userGroupId = Column(UUID(as_uuid=True), ForeignKey("user_groups.userGroupId"), nullable=False)
-    
-    # Relationships
-    course = relationship("Course", back_populates="course_to_user_groups")
-    user_group = relationship("UserGroup", back_populates="course_to_user_groups")
+    user = relationship("User", back_populates="user_to_deployments")
+    deployment = relationship("Deployment", back_populates="user_to_deployments")
 
 # ----------------------------------------------------------------
 # TEAM MODEL
@@ -177,10 +142,10 @@ class Team(Base):
     
     teamId = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     name = Column(String, nullable=False)
-    userGroupId = Column(UUID(as_uuid=True), ForeignKey("user_groups.userGroupId"), nullable=False)
+    deploymentId = Column(UUID(as_uuid=True), ForeignKey("deployments.deploymentId"), nullable=False)
     
     # Relationships
-    user_group = relationship("UserGroup", back_populates="teams")
+    deployment = relationship("Deployment", back_populates="teams")
     user_to_teams = relationship("UserToTeam", back_populates="team")
 
 # ----------------------------------------------------------------

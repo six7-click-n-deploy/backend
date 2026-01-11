@@ -5,11 +5,11 @@ from uuid import UUID
 import json
 
 from app.database import get_db
-from app.models import TaskType, User, DeploymentStatus
-from app.schemas import DeploymentCreate, DeploymentUpdate, DeploymentResponse, DeploymentWithRelations
-from app.utils.auth import get_current_user
+from app.models import TaskType, User
+from app.schemas import DeploymentCreate, DeploymentResponse, DeploymentWithRelations
+from app.utils.keycloak_auth import get_current_user_keycloak
 from app.utils.permissions import ensure_resource_access
-from app.crud import deployments as crud_deployments
+from app.crud import deployments as crud_deployments, teams as crud_teams
 from app.services.task_service import task_service
 
 router = APIRouter()
@@ -24,9 +24,8 @@ def list_deployments(
     limit: int = 100,
     user_id: Optional[UUID] = None,
     app_id: Optional[UUID] = None,
-    status_filter: Optional[DeploymentStatus] = None,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user_keycloak)
 ):
     """
     Get all deployments with optional filters
@@ -60,7 +59,7 @@ def list_deployments(
 def get_deployment(
     deployment_id: UUID,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user_keycloak)
 ):
     """Get deployment by ID with all relations"""
     deployment = crud_deployments.get_deployment(db, deployment_id)
@@ -83,7 +82,7 @@ def get_deployment(
 def create_deployment(
     deployment: DeploymentCreate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user_keycloak)
 ):
     """
     Create a new deployment
@@ -92,10 +91,53 @@ def create_deployment(
     """
     db_deployment = crud_deployments.create_deployment(db, deployment, current_user.userId)
 
+    # Create teams and collect all user IDs
+    user_ids_in_deployment = set()
+    
+    if deployment.teams:
+        teams_data = [
+            {"name": team.name, "userIds": team.userIds}
+            for team in deployment.teams
+        ]
+        crud_teams.create_teams_for_deployment(
+            db=db,
+            deployment_id=db_deployment.deploymentId,
+            teams_data=teams_data
+        )
+        
+        # Collect all user IDs from teams
+        for team in deployment.teams:
+            user_ids_in_deployment.update(team.userIds)
+    
+    # Create UserToDeployment entries
+    if user_ids_in_deployment:
+        crud_deployments.create_user_to_deployments(
+            db=db,
+            deployment_id=db_deployment.deploymentId,
+            user_ids=user_ids_in_deployment
+        )
+    
+    db.commit()
+    db.refresh(db_deployment)
+    
     try:
         user_vars = json.loads(db_deployment.userInputVar) if db_deployment.userInputVar else {}
     except Exception:
         user_vars = {}
+    
+    # Format teams for Terraform (team_name: [user_emails])
+    teams_dict = {}
+    if deployment.teams:
+        for team in deployment.teams:
+            # Get user emails from user IDs
+            from app.crud import users as crud_users
+            team_users = []
+            for user_id in team.userIds:
+                user = crud_users.get_user(db, user_id)
+                if user:
+                    team_users.append({"email": user.email})
+            
+            teams_dict[team.name] = team_users
 
     # Start deployment task
     task, celery_task_id = task_service.register_new_task(
@@ -107,66 +149,12 @@ def create_deployment(
             str(db_deployment.deploymentId),
             db_deployment.app.git_link,
             db_deployment.releaseTag,
-            user_vars
+            user_vars,
+            teams_dict  # Teams mit User-Emails
         ],
     )
 
     return db_deployment
-
-# ----------------------------------------------------------------
-# UPDATE DEPLOYMENT
-# ----------------------------------------------------------------
-@router.put("/{deployment_id}", response_model=DeploymentResponse)
-def update_deployment(
-    deployment_id: UUID,
-    deployment_update: DeploymentUpdate,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
-):
-    """
-    Update a deployment
-    - **Owner or Teacher/Admin** can update
-    """
-    deployment = crud_deployments.get_deployment(db, deployment_id)
-    if not deployment:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Deployment not found"
-        )
-    
-    # Check access permission
-    ensure_resource_access(deployment.userId, current_user)
-    
-    updated_deployment = crud_deployments.update_deployment(db, deployment_id, deployment_update)
-    return updated_deployment
-
-
-# ----------------------------------------------------------------
-# UPDATE DEPLOYMENT STATUS
-# ----------------------------------------------------------------
-@router.patch("/{deployment_id}/status", response_model=DeploymentResponse)
-def update_deployment_status(
-    deployment_id: UUID,
-    new_status: DeploymentStatus,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
-):
-    """
-    Update deployment status
-    - **Owner or Teacher/Admin** can update status
-    """
-    deployment = crud_deployments.get_deployment(db, deployment_id)
-    if not deployment:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Deployment not found"
-        )
-    
-    # Check access permission
-    ensure_resource_access(deployment.userId, current_user)
-    
-    updated_deployment = crud_deployments.update_deployment_status(db, deployment_id, new_status)
-    return updated_deployment
 
 
 # ----------------------------------------------------------------
@@ -176,7 +164,7 @@ def update_deployment_status(
 def delete_deployment(
     deployment_id: UUID,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user_keycloak)
 ):
     """
     Delete a deployment
