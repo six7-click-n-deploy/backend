@@ -24,6 +24,7 @@ def list_deployments(
     limit: int = 100,
     user_id: Optional[UUID] = None,
     app_id: Optional[UUID] = None,
+    status_filter: Optional[str] = None,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user_keycloak)
 ):

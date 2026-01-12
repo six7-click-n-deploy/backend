@@ -17,6 +17,7 @@ def get_deployments(
     limit: int = 100,
     user_id: Optional[UUID] = None,
     app_id: Optional[UUID] = None,
+    status: Optional[str] = None,
 ) -> List[Deployment]:
     """Get deployments with optional filters"""
     query = db.query(Deployment)
