@@ -6,7 +6,16 @@ import json
 
 from app.database import get_db
 from app.models import TaskType, User
-from app.schemas import DeploymentCreate, DeploymentResponse, DeploymentWithRelations
+from app.schemas import (
+    DeploymentCreate, 
+    DeploymentResponse, 
+    DeploymentWithRelations,
+    DeploymentDetail,
+    DeploymentTeamResponse,
+    DeploymentTeamMember,
+    TaskSummary,
+    DeploymentOutputs,
+)
 from app.utils.keycloak_auth import get_current_user_keycloak
 from app.utils.permissions import ensure_resource_access
 from app.crud import deployments as crud_deployments, teams as crud_teams
@@ -50,20 +59,45 @@ def list_deployments(
         app_id=app_id,
         status=status_filter
     )
-    return deployments
+    
+    # Enrich with status and created_at from tasks
+    result = []
+    for deployment in deployments:
+        status_value = crud_deployments.get_deployment_status(db, deployment.deploymentId)
+        created_at = crud_deployments.get_deployment_created_at(db, deployment.deploymentId)
+        result.append(DeploymentResponse(
+            deploymentId=deployment.deploymentId,
+            name=deployment.name,
+            appId=deployment.appId,
+            userId=deployment.userId,
+            releaseTag=deployment.releaseTag,
+            userInputVar=deployment.userInputVar,
+            status=status_value,
+            created_at=created_at,
+        ))
+    
+    return result
 
 
 # ----------------------------------------------------------------
-# GET DEPLOYMENT BY ID
+# GET DEPLOYMENT BY ID (Full Details)
 # ----------------------------------------------------------------
-@router.get("/{deployment_id}", response_model=DeploymentWithRelations)
+@router.get("/{deployment_id}", response_model=DeploymentDetail)
 def get_deployment(
     deployment_id: UUID,
+    include_logs: bool = False,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user_keycloak)
 ):
-    """Get deployment by ID with all relations"""
-    deployment = crud_deployments.get_deployment(db, deployment_id)
+    """
+    Get deployment by ID with full details including:
+    - User and App relations
+    - Teams with members
+    - Latest task status
+    - Terraform outputs
+    - Optionally: full logs (use include_logs=true)
+    """
+    deployment = crud_deployments.get_deployment_with_details(db, deployment_id)
     if not deployment:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -73,7 +107,65 @@ def get_deployment(
     # Check access permission
     ensure_resource_access(deployment.userId, current_user)
     
-    return deployment
+    # Get latest task
+    latest_task = crud_deployments.get_latest_task(db, deployment_id)
+    task_summary = None
+    logs = None
+    
+    if latest_task:
+        task_summary = TaskSummary(
+            taskId=latest_task.taskId,
+            type=latest_task.type,
+            status=latest_task.status,
+            started_at=latest_task.started_at,
+            finished_at=latest_task.finished_at,
+            created_at=latest_task.created_at,
+        )
+        if include_logs:
+            logs = latest_task.logs
+    
+    # Get teams with members
+    teams_data = crud_deployments.get_deployment_teams_with_members(db, deployment_id)
+    teams = [
+        DeploymentTeamResponse(
+            teamId=team["teamId"],
+            name=team["name"],
+            members=[
+                DeploymentTeamMember(
+                    userId=member["userId"],
+                    email=member["email"],
+                    username=member["username"]
+                )
+                for member in team["members"]
+            ]
+        )
+        for team in teams_data
+    ]
+    
+    # Get outputs
+    outputs_data = crud_deployments.get_deployment_outputs(db, deployment_id)
+    outputs = DeploymentOutputs(raw=outputs_data) if outputs_data else None
+    
+    # Get status and created_at from tasks
+    status_value = crud_deployments.get_deployment_status(db, deployment_id)
+    created_at = crud_deployments.get_deployment_created_at(db, deployment_id)
+    
+    return DeploymentDetail(
+        deploymentId=deployment.deploymentId,
+        name=deployment.name,
+        appId=deployment.appId,
+        userId=deployment.userId,
+        releaseTag=deployment.releaseTag,
+        userInputVar=deployment.userInputVar,
+        status=status_value,
+        created_at=created_at,
+        user=deployment.user,
+        app=deployment.app,
+        teams=teams,
+        latest_task=task_summary,
+        outputs=outputs,
+        logs=logs,
+    )
 
 
 # ----------------------------------------------------------------
