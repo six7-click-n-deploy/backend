@@ -20,6 +20,7 @@ class Settings(BaseSettings):
 
     # Git
     TEMP_REPO_BASE_PATH: str = "/tmp/worker_repos"
+    GIT_ACCESS_TOKEN: str = ""  # Token for HTTPS git authentication
     
     # Keycloak
     KEYCLOAK_SERVER_URL: str = "http://keycloak:8080"
