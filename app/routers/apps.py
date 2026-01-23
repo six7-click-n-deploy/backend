@@ -135,16 +135,10 @@ def list_apps(
 @router.get("/{app_id}", response_model=AppWithVersions)
 def get_app(
     app_id: UUID,
-    refresh: bool = False,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user_keycloak)
 ):
-    """
-    Get app by ID with available versions
-    
-    Query Parameters:
-    - refresh: If true, bypass cache and fetch fresh versions from Git
-    """
+    """Get app by ID with available versions."""
     app = crud_apps.get_app(db, app_id)
     if not app:
         raise HTTPException(
@@ -158,7 +152,7 @@ def get_app(
     # Fetch versions if git_link exists
     if app.git_link:
         try:
-            app.versions = git_service.get_versions(app.git_link, refresh=refresh)
+            app.versions = git_service.get_versions(app.git_link)
         except Exception as e:
             app.versions = []
             import logging
@@ -261,7 +255,18 @@ def create_app(
     """
     Create a new app
     - **All authenticated users** can create apps
+    - **Git repository access is verified** before creating the app
     """
+    # Verify repository access if git_link is provided
+    if app.git_link:
+        access_result = git_service.verify_repository_access(app.git_link)
+        if not access_result['success']:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=access_result['message']
+            )
+        logger.info(f"Repository access verified for {app.git_link}")
+    
     return crud_apps.create_app(db, app, current_user.userId)
 
 
