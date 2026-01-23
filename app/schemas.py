@@ -117,13 +117,63 @@ class DeploymentCreate(DeploymentBase):
 class DeploymentResponse(DeploymentBase):
     deploymentId: UUID
     userId: UUID
+    releaseTag: Optional[str] = None
     userInputVar: Optional[str] = None
+    status: Optional[str] = None  # From latest task
+    created_at: Optional[datetime] = None
     
     model_config = ConfigDict(from_attributes=True)
 
 class DeploymentWithRelations(DeploymentResponse):
     user: UserResponse
     app: AppResponse
+    
+    model_config = ConfigDict(from_attributes=True)
+
+
+# Team response for deployment details (from DB)
+class DeploymentTeamMember(BaseModel):
+    userId: UUID
+    email: str
+    username: str
+    
+    model_config = ConfigDict(from_attributes=True)
+
+class DeploymentTeamResponse(BaseModel):
+    teamId: UUID
+    name: str
+    members: List[DeploymentTeamMember] = []
+    
+    model_config = ConfigDict(from_attributes=True)
+
+
+# Task summary for deployment details
+class TaskSummary(BaseModel):
+    taskId: UUID
+    type: TaskType
+    status: TaskStatus
+    started_at: Optional[datetime] = None
+    finished_at: Optional[datetime] = None
+    created_at: datetime
+    
+    model_config = ConfigDict(from_attributes=True)
+
+
+# Terraform outputs parsed
+class DeploymentOutputs(BaseModel):
+    """Parsed Terraform outputs - structure depends on app"""
+    raw: Optional[Dict[str, Any]] = None  # Full outputs as dict
+    
+    model_config = ConfigDict(from_attributes=True)
+
+
+# Full deployment detail response
+class DeploymentDetail(DeploymentWithRelations):
+    """Full deployment details with teams, task info, and outputs"""
+    teams: List[DeploymentTeamResponse] = []
+    latest_task: Optional[TaskSummary] = None
+    outputs: Optional[DeploymentOutputs] = None
+    logs: Optional[str] = None  # Optional: can be excluded for large logs
     
     model_config = ConfigDict(from_attributes=True)
 
