@@ -135,8 +135,8 @@ def get_deployments(
     if app_id:
         query = query.filter(Deployment.appId == app_id)
     
-    # Order by created_at desc (newest first)
-    query = query.order_by(desc(Deployment.created_at))
+    # Order by deploymentId (UUID) - could also join with Task for created_at ordering
+    query = query.order_by(desc(Deployment.deploymentId))
     
     deployments = query.offset(skip).limit(limit).all()
     
