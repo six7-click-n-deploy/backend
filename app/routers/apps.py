@@ -257,6 +257,7 @@ def create_app(
     - **All authenticated users** can create apps
     - **Git repository access is verified** before creating the app
     """
+    logger = logging.getLogger(__name__)
     # Verify repository access if git_link is provided
     if app.git_link:
         access_result = git_service.verify_repository_access(app.git_link)
