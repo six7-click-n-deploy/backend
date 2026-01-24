@@ -9,7 +9,7 @@ from app.schemas import (
     UserResponse, UserWithCourse, UserUpdate, UserPasswordUpdate,
     UserStatistics
 )
-from app.utils.keycloak_auth import get_current_user_keycloak
+from app.utils.keycloak_auth import get_current_user_keycloak, search_keycloak_users
 from app.utils.auth import verify_password
 from app.utils.permissions import get_current_admin, get_current_teacher_or_admin, ensure_resource_access
 from app.crud import users as crud_users
@@ -46,20 +46,34 @@ def list_users(
     return users
 
 # ----------------------------------------------------------------
-# SEARCH USERS
+# SEARCH USERS FROM KEYCLOAK
 # ----------------------------------------------------------------
-@router.get("/search", response_model=List[UserResponse])
-def search_users(
+@router.get("/search")
+def search_users_keycloak(
     query: str,
     limit: int = 10,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user_keycloak)
+    current_user: User = Depends(get_current_teacher_or_admin)
 ):
     """
-    Search users by username or email
-    - **All authenticated users** can search
+    Search users directly from Keycloak by username, email, or name
+    - **Requires**: TEACHER or ADMIN role
+    - Returns users from Keycloak (not local DB)
+    
+    Response:
+    - id: Keycloak user ID
+    - username: Username
+    - email: Email address
+    - firstName: First name
+    - lastName: Last name
+    - enabled: Account enabled status
     """
-    users = crud_users.search_users(db, query, limit)
+    if not query or len(query) < 2:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Search query must be at least 2 characters"
+        )
+    
+    users = search_keycloak_users(query, limit)
     return users
 
 # ----------------------------------------------------------------

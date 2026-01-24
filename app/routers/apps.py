@@ -20,6 +20,50 @@ router = APIRouter()
 # ----------------------------------------------------------------
 # HELPER FUNCTIONS FOR PARSING HCL VARIABLES
 # ----------------------------------------------------------------
+def _detect_openstack_enum(var_name: str, description: str) -> str | None:
+    """Detect if variable is an OpenStack resource enum"""
+    var_lower = var_name.lower()
+    desc_lower = description.lower()
+    
+    # Check for network-related variables
+    if any(keyword in var_lower for keyword in ['network', 'net_id', 'subnet']):
+        return "network"
+    
+    # Check for flavor/instance type
+    if any(keyword in var_lower for keyword in ['flavor', 'instance_type', 'instance_size']):
+        return "flavor"
+    
+    # Check for security groups
+    if 'security' in var_lower and 'group' in var_lower:
+        return "security_group"
+    
+    # Check for floating IP pool
+    if 'floating' in var_lower and ('ip' in var_lower or 'pool' in var_lower):
+        return "floating_ip_pool"
+    
+    # Check for image
+    if any(keyword in var_lower for keyword in ['image', 'image_id', 'image_name']):
+        return "image"
+    
+    # Check for keypair
+    if any(keyword in var_lower for keyword in ['keypair', 'key_pair', 'ssh_key']):
+        return "keypair"
+    
+    # Check for volume
+    if 'volume' in var_lower:
+        return "volume"
+    
+    # Check description for hints
+    if 'network' in desc_lower and 'uuid' in desc_lower:
+        return "network"
+    if 'flavor' in desc_lower or 'instance type' in desc_lower:
+        return "flavor"
+    if 'security group' in desc_lower:
+        return "security_group"
+    
+    return None
+
+
 def _parse_terraform_variables(file_path: str) -> List[Dict[str, Any]]:
     """Parse Terraform `variables.tf` file"""
     with open(file_path, 'r') as f:
@@ -45,17 +89,29 @@ def _parse_terraform_variables(file_path: str) -> List[Dict[str, Any]]:
         default_match = re.search(r'default\s*=\s*([^\n]+)', var_block)
         default_value = default_match.group(1).strip() if default_match else None
         
+        # Remove surrounding quotes from string literals to prevent double-escaping
+        if default_value and default_value.startswith('"') and default_value.endswith('"'):
+            default_value = default_value[1:-1]
+        
         # Check if required (no default = required)
         required = default_value is None
         
-        variables.append({
+        # Detect OpenStack enum type
+        openstack_type = _detect_openstack_enum(var_name, description)
+        
+        var_info = {
             "name": var_name,
             "type": var_type,
             "description": description,
             "default": default_value,
             "required": required,
             "source": "terraform"
-        })
+        }
+        
+        if openstack_type:
+            var_info["openstack_type"] = openstack_type
+        
+        variables.append(var_info)
     
     return variables
 
@@ -85,17 +141,29 @@ def _parse_packer_variables(file_path: str) -> List[Dict[str, Any]]:
         default_match = re.search(r'default\s*=\s*([^\n]+)', var_block)
         default_value = default_match.group(1).strip() if default_match else None
         
+        # Remove surrounding quotes from string literals to prevent double-escaping
+        if default_value and default_value.startswith('"') and default_value.endswith('"'):
+            default_value = default_value[1:-1]
+        
         # Check if required
         required = default_value is None
         
-        variables.append({
+        # Detect OpenStack enum type
+        openstack_type = _detect_openstack_enum(var_name, description)
+        
+        var_info = {
             "name": var_name,
             "type": var_type,
             "description": description,
             "default": default_value,
             "required": required,
             "source": "packer"
-        })
+        }
+        
+        if openstack_type:
+            var_info["openstack_type"] = openstack_type
+        
+        variables.append(var_info)
     
     return variables
 
