@@ -50,7 +50,6 @@ class User(Base):
     keycloak_id = Column(String, unique=True, index=True, nullable=True)  # Keycloak User ID (sub)
     email = Column(String, unique=True, index=True, nullable=False)
     username = Column(String, nullable=False)
-    password = Column(String, nullable=True)  # Legacy - wird nach Migration entfernt
     role = Column(Enum(UserRole), nullable=False, default=UserRole.STUDENT)
     courseId = Column(UUID(as_uuid=True), ForeignKey("courses.courseId"), nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)

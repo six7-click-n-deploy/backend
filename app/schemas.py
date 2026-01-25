@@ -12,7 +12,6 @@ class UserBase(BaseModel):
     username: str
 
 class UserCreate(UserBase):
-    password: str
     role: UserRole = UserRole.STUDENT
     courseId: Optional[UUID] = None
 
@@ -22,13 +21,6 @@ class UserUpdate(BaseModel):
     role: Optional[UserRole] = None
     courseId: Optional[UUID] = None
 
-class UserPasswordUpdate(BaseModel):
-    current_password: str
-    new_password: str
-
-class UserLogin(BaseModel):
-    username: str
-    password: str
 
 class UserResponse(UserBase):
     userId: UUID

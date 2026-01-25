@@ -6,11 +6,10 @@ from uuid import UUID
 from app.database import get_db
 from app.models import User, UserRole
 from app.schemas import (
-    UserResponse, UserWithCourse, UserUpdate, UserPasswordUpdate,
+    UserResponse, UserWithCourse, UserUpdate,
     UserStatistics
 )
 from app.utils.keycloak_auth import get_current_user_keycloak, search_keycloak_users
-from app.utils.auth import verify_password
 from app.utils.permissions import get_current_admin, get_current_teacher_or_admin, ensure_resource_access
 from app.crud import users as crud_users
 from app.crud import apps as crud_apps
@@ -180,37 +179,6 @@ def update_user(
     updated_user = crud_users.update_user(db, user_id, user_update)
     return updated_user
 
-# ----------------------------------------------------------------
-# CHANGE PASSWORD
-# ----------------------------------------------------------------
-@router.post("/{user_id}/password", status_code=status.HTTP_204_NO_CONTENT)
-def change_password(
-    user_id: UUID,
-    password_update: UserPasswordUpdate,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user_keycloak)
-):
-    """
-    Change user password
-    - **Owner only** can change password
-    - Requires current password verification
-    """
-    if user_id != current_user.userId:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="You can only change your own password"
-        )
-    
-    # Verify current password
-    if not verify_password(password_update.current_password, current_user.password):
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Current password is incorrect"
-        )
-    
-    # Update password
-    crud_users.update_user_password(db, user_id, password_update.new_password)
-    return None
 
 # ----------------------------------------------------------------
 # DELETE USER (ADMIN ONLY)
