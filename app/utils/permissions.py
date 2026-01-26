@@ -6,7 +6,7 @@ from fastapi import HTTPException, status, Depends
 from typing import List, Callable
 
 from app.models import User, UserRole
-from app.utils.auth import get_current_user
+from app.utils.keycloak_auth import get_current_user_keycloak as get_current_user
 
 
 # ----------------------------------------------------------------

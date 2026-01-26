@@ -12,7 +12,6 @@ class UserBase(BaseModel):
     username: str
 
 class UserCreate(UserBase):
-    password: str
     role: UserRole = UserRole.STUDENT
     courseId: Optional[UUID] = None
 
@@ -22,18 +21,14 @@ class UserUpdate(BaseModel):
     role: Optional[UserRole] = None
     courseId: Optional[UUID] = None
 
-class UserPasswordUpdate(BaseModel):
-    current_password: str
-    new_password: str
-
-class UserLogin(BaseModel):
-    username: str
-    password: str
 
 class UserResponse(UserBase):
     userId: UUID
     role: UserRole
     courseId: Optional[UUID] = None
+    keycloak_id: Optional[str] = None
+    firstName: Optional[str] = None
+    lastName: Optional[str] = None
     created_at: datetime
     
     model_config = ConfigDict(from_attributes=True)

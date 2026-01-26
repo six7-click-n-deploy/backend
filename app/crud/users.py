@@ -5,7 +5,6 @@ from uuid import UUID
 
 from app.models import User, UserRole
 from app.schemas import UserCreate, UserUpdate
-from app.utils.auth import get_password_hash
 
 
 def get_user(db: Session, user_id: UUID) -> Optional[User]:
@@ -43,11 +42,9 @@ def get_users(
 
 def create_user(db: Session, user: UserCreate) -> User:
     """Create a new user"""
-    hashed_password = get_password_hash(user.password)
     db_user = User(
         email=user.email,
         username=user.username,
-        password=hashed_password,
         role=user.role,
         courseId=user.courseId
     )
@@ -72,16 +69,6 @@ def update_user(db: Session, user_id: UUID, user_update: UserUpdate) -> Optional
     return db_user
 
 
-def update_user_password(db: Session, user_id: UUID, new_password: str) -> Optional[User]:
-    """Update user password"""
-    db_user = get_user(db, user_id)
-    if not db_user:
-        return None
-    
-    db_user.password = get_password_hash(new_password)
-    db.commit()
-    db.refresh(db_user)
-    return db_user
 
 
 def delete_user(db: Session, user_id: UUID) -> bool:

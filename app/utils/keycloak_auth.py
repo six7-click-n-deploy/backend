@@ -6,7 +6,7 @@ from typing import Optional
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from sqlalchemy.orm import Session
-from keycloak import KeycloakOpenID, KeycloakAuthenticationError
+from keycloak import KeycloakOpenID, KeycloakAdmin, KeycloakAuthenticationError
 from jose import jwt, JWTError
 
 from app.config import settings
@@ -29,6 +29,16 @@ def get_keycloak_client() -> KeycloakOpenID:
         realm_name=settings.KEYCLOAK_REALM,
         client_secret_key=settings.KEYCLOAK_CLIENT_SECRET,
         verify=True  # Set to False for local dev with self-signed certs
+    )
+
+def get_keycloak_admin() -> KeycloakAdmin:
+    """Get Keycloak Admin client instance using appstore-backend service account"""
+    return KeycloakAdmin(
+        server_url=settings.KEYCLOAK_SERVER_URL,
+        realm_name=settings.KEYCLOAK_REALM,
+        client_id=settings.KEYCLOAK_CLIENT_ID,
+        client_secret_key=settings.KEYCLOAK_CLIENT_SECRET,
+        verify=True
     )
 
 # ----------------------------------------------------------------
@@ -121,6 +131,12 @@ def verify_keycloak_token_offline(token: str) -> dict:
             detail=f"Invalid token: {str(e)}",
             headers={"WWW-Authenticate": "Bearer"},
         )
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail=f"Token validation failed: {str(e)}",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
 
 # ----------------------------------------------------------------
 # ROLE MAPPING
@@ -211,13 +227,15 @@ def get_current_user_hybrid(
     """
     token = credentials.credentials
     
+    keycloak_error = None
+    legacy_error = None
+    
     # Try Keycloak first
     if settings.KEYCLOAK_ENABLED:
         try:
             return get_current_user_keycloak(credentials, db)
-        except HTTPException:
-            # If Keycloak fails, try legacy auth
-            pass
+        except HTTPException as e:
+            keycloak_error = e.detail
     
     # Fallback to legacy JWT auth (import from old auth.py)
     from app.utils.auth import verify_token, get_current_user
@@ -226,12 +244,96 @@ def get_current_user_hybrid(
         user = db.query(User).filter(User.username == username).first()
         if user:
             return user
-    except:
-        pass
+        legacy_error = "User not found in database"
+    except Exception as e:
+        legacy_error = str(e)
     
-    # Both methods failed
+    # Both methods failed - provide detailed error
+    error_details = []
+    if keycloak_error:
+        error_details.append(f"Keycloak: {keycloak_error}")
+    if legacy_error:
+        error_details.append(f"Legacy: {legacy_error}")
+    
     raise HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
-        detail="Could not validate credentials",
+        detail=f"Authentication failed. {' | '.join(error_details)}",
         headers={"WWW-Authenticate": "Bearer"},
     )
+
+# ----------------------------------------------------------------
+# KEYCLOAK USER SEARCH
+# ----------------------------------------------------------------
+def search_keycloak_users(search_query: str, max_results: int = 10) -> list[dict]:
+    """
+    Search users in Keycloak by username or email
+    Uses service account client (OAuth2 client_credentials grant)
+    
+    Args:
+        search_query: Search string (matches username, email, first/last name)
+        max_results: Maximum number of results to return
+        
+    Returns:
+        List of user dicts with: id, username, email, firstName, lastName
+        
+    Raises:
+        HTTPException: If Keycloak query fails
+    """
+    try:
+        keycloak_admin = get_keycloak_admin()
+        
+        # Search users in Keycloak
+        users = keycloak_admin.get_users({
+            "search": search_query,
+            "max": max_results
+        })
+        
+        # Return simplified user info
+        return [{
+            "id": user.get("id"),
+            "username": user.get("username"),
+            "email": user.get("email"),
+            "firstName": user.get("firstName", ""),
+            "lastName": user.get("lastName", ""),
+            "enabled": user.get("enabled", True)
+        } for user in users]
+        
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to search Keycloak users: {str(e)}"
+        )
+
+
+def get_keycloak_users_by_ids(ids: list[str]) -> dict:
+    """
+    Fetch Keycloak user info for a list of Keycloak IDs.
+    Returns a mapping id -> simplified user dict {id, username, email, firstName, lastName}
+    """
+    result: dict = {}
+    if not ids:
+        return result
+    try:
+        kc = get_keycloak_admin()
+        for kid in ids:
+            try:
+                user = kc.get_user(kid)
+            except Exception:
+                # Some Keycloak clients expose get_user or require different call; try get_users fallback
+                try:
+                    users = kc.get_users({"search": kid, "max": 1})
+                    user = users[0] if users else None
+                except Exception:
+                    user = None
+            if not user:
+                continue
+            result[user.get("id") or kid] = {
+                "id": user.get("id") or kid,
+                "username": user.get("username"),
+                "email": user.get("email"),
+                "firstName": user.get("firstName", ""),
+                "lastName": user.get("lastName", ""),
+            }
+        return result
+    except Exception as e:
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Failed to fetch Keycloak users: {str(e)}")

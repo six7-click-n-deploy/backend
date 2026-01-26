@@ -214,6 +214,20 @@ def create_deployment(
     db.refresh(db_deployment)
     
     try:
+        """
+        Parse user input variables
+        structure: {
+            packer : { 
+                "variable_name": "value",
+                ...
+            },
+            terraform: { 
+                "variable_name": "value",
+                ...
+            }
+        }
+        """
+        # TODO: Verify and validate user input variables against structure definition
         user_vars = json.loads(db_deployment.userInputVar) if db_deployment.userInputVar else {}
     except Exception:
         user_vars = {}
@@ -240,6 +254,7 @@ def create_deployment(
         celery_task_name="tasks.deploy_application",
         celery_args=[
             str(db_deployment.deploymentId),
+            str(db_deployment.appId),
             db_deployment.app.git_link,
             db_deployment.releaseTag,
             user_vars,

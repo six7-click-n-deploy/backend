@@ -6,11 +6,10 @@ from uuid import UUID
 from app.database import get_db
 from app.models import User, UserRole
 from app.schemas import (
-    UserResponse, UserWithCourse, UserUpdate, UserPasswordUpdate,
+    UserResponse, UserWithCourse, UserUpdate,
     UserStatistics
 )
-from app.utils.keycloak_auth import get_current_user_keycloak
-from app.utils.auth import verify_password
+from app.utils.keycloak_auth import get_current_user_keycloak, search_keycloak_users, get_keycloak_users_by_ids
 from app.utils.permissions import get_current_admin, get_current_teacher_or_admin, ensure_resource_access
 from app.crud import users as crud_users
 from app.crud import apps as crud_apps
@@ -43,23 +42,67 @@ def list_users(
     - **Requires**: TEACHER or ADMIN role
     """
     users = crud_users.get_users(db, skip=skip, limit=limit, role=role, course_id=course_id)
-    return users
+    # Enrich users with Keycloak names when keycloak_id is present
+    kc_ids = [u.keycloak_id for u in users if getattr(u, 'keycloak_id', None)]
+    kc_map = {}
+    if kc_ids:
+        try:
+            kc_map = get_keycloak_users_by_ids(kc_ids)
+        except HTTPException:
+            # If enrichment fails, continue returning base users
+            kc_map = {}
+
+    result = []
+    for u in users:
+        user_obj = {
+            "userId": u.userId,
+            "email": u.email,
+            "username": u.username,
+            "role": u.role,
+            "courseId": u.courseId,
+            "created_at": u.created_at,
+            "keycloak_id": getattr(u, 'keycloak_id', None),
+            # default empty strings if not available
+            "firstName": None,
+            "lastName": None,
+        }
+        if user_obj["keycloak_id"] and user_obj["keycloak_id"] in kc_map:
+            kc = kc_map[user_obj["keycloak_id"]]
+            user_obj["firstName"] = kc.get("firstName")
+            user_obj["lastName"] = kc.get("lastName")
+        result.append(user_obj)
+
+    return result
 
 # ----------------------------------------------------------------
-# SEARCH USERS
+# SEARCH USERS FROM KEYCLOAK
 # ----------------------------------------------------------------
-@router.get("/search", response_model=List[UserResponse])
-def search_users(
+@router.get("/search")
+def search_users_keycloak(
     query: str,
     limit: int = 10,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user_keycloak)
+    current_user: User = Depends(get_current_teacher_or_admin)
 ):
     """
-    Search users by username or email
-    - **All authenticated users** can search
+    Search users directly from Keycloak by username, email, or name
+    - **Requires**: TEACHER or ADMIN role
+    - Returns users from Keycloak (not local DB)
+    
+    Response:
+    - id: Keycloak user ID
+    - username: Username
+    - email: Email address
+    - firstName: First name
+    - lastName: Last name
+    - enabled: Account enabled status
     """
-    users = crud_users.search_users(db, query, limit)
+    if not query or len(query) < 2:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Search query must be at least 2 characters"
+        )
+    
+    users = search_keycloak_users(query, limit)
     return users
 
 # ----------------------------------------------------------------
@@ -166,37 +209,6 @@ def update_user(
     updated_user = crud_users.update_user(db, user_id, user_update)
     return updated_user
 
-# ----------------------------------------------------------------
-# CHANGE PASSWORD
-# ----------------------------------------------------------------
-@router.post("/{user_id}/password", status_code=status.HTTP_204_NO_CONTENT)
-def change_password(
-    user_id: UUID,
-    password_update: UserPasswordUpdate,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user_keycloak)
-):
-    """
-    Change user password
-    - **Owner only** can change password
-    - Requires current password verification
-    """
-    if user_id != current_user.userId:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="You can only change your own password"
-        )
-    
-    # Verify current password
-    if not verify_password(password_update.current_password, current_user.password):
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Current password is incorrect"
-        )
-    
-    # Update password
-    crud_users.update_user_password(db, user_id, password_update.new_password)
-    return None
 
 # ----------------------------------------------------------------
 # DELETE USER (ADMIN ONLY)
