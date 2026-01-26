@@ -1,3 +1,40 @@
+# ----------------------------------------------------------------
+from sqlalchemy.orm import Session
+from app.models import User, UserRole
+# ZENTRALE USER-SYNC-FUNKTION
+# ----------------------------------------------------------------
+def sync_user_from_keycloak(db: Session, keycloak_user_data: dict) -> User:
+    """
+    Synchronisiert einen User aus Keycloak-Daten in die lokale DB.
+    Legt an, falls nicht vorhanden, oder updated Rolle, falls nötig.
+    Erwartet keycloak_user_data mit Feldern: id, username, email, roles (Liste), firstName, lastName
+    """
+    from app.models import User, UserRole
+    # Keycloak User ID
+    keycloak_id = keycloak_user_data.get("id") or keycloak_user_data.get("sub")
+    email = keycloak_user_data.get("email") or f"{keycloak_user_data.get('username')}@dhbw.de"
+    username = keycloak_user_data.get("username") or keycloak_id
+    keycloak_roles = keycloak_user_data.get("roles") or keycloak_user_data.get("realm_access", {}).get("roles", [])
+    app_role = map_keycloak_roles_to_app_role(keycloak_roles)
+
+    user = db.query(User).filter(User.keycloak_id == keycloak_id).first()
+    if not user:
+        user = User(
+            keycloak_id=keycloak_id,
+            email=email,
+            username=username,
+            role=app_role
+        )
+        db.add(user)
+        db.commit()
+        db.refresh(user)
+    else:
+        # Update Rolle, falls sie sich geändert hat
+        if user.role != app_role:
+            user.role = app_role
+            db.commit()
+            db.refresh(user)
+    return user
 """
 Keycloak Authentication & Authorization
 Handles token validation and user management with Keycloak
@@ -187,31 +224,13 @@ def get_current_user_keycloak(
             detail="Token missing user ID (sub)",
         )
     
-    # Try to find user by keycloak_id
-    user = db.query(User).filter(User.keycloak_id == keycloak_id).first()
-    
-    if not user:
-        # Just-in-Time User Provisioning: Create user if not exists
-        app_role = map_keycloak_roles_to_app_role(keycloak_roles)
-        
-        user = User(
-            keycloak_id=keycloak_id,
-            email=email or f"{username}@dhbw.de",  # Fallback email
-            username=username or keycloak_id,
-            role=app_role,
-            password=None,  # No password for Keycloak users
-        )
-        db.add(user)
-        db.commit()
-        db.refresh(user)
-    else:
-        # Update role if changed in Keycloak
-        app_role = map_keycloak_roles_to_app_role(keycloak_roles)
-        if user.role != app_role:
-            user.role = app_role
-            db.commit()
-            db.refresh(user)
-    
+    # Zentrale Sync-Funktion nutzen
+    user = sync_user_from_keycloak(db, {
+        "id": keycloak_id,
+        "email": email,
+        "username": username,
+        "roles": keycloak_roles
+    })
     return user
 
 # ----------------------------------------------------------------
