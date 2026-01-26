@@ -102,8 +102,27 @@ def search_users_keycloak(
             detail="Search query must be at least 2 characters"
         )
     
-    users = search_keycloak_users(query, limit)
-    return users
+    from app.database import get_db
+    db = next(get_db())
+    from app.utils.keycloak_auth import sync_user_from_keycloak
+
+    keycloak_users = search_keycloak_users(query, limit)
+    results = []
+    for kc_user in keycloak_users:
+        # User in lokaler DB anlegen/aktualisieren (zentral)
+        db_user = sync_user_from_keycloak(db, kc_user)
+        results.append({
+            "userId": db_user.userId,
+            "email": db_user.email,
+            "username": db_user.username,
+            "role": db_user.role,
+            "courseId": db_user.courseId,
+            "created_at": db_user.created_at,
+            "keycloak_id": db_user.keycloak_id,
+            "firstName": kc_user.get("firstName"),
+            "lastName": kc_user.get("lastName"),
+        })
+    return results
 
 # ----------------------------------------------------------------
 # GET USER BY ID

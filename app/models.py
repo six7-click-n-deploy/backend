@@ -50,6 +50,8 @@ class User(Base):
     keycloak_id = Column(String, unique=True, index=True, nullable=True)  # Keycloak User ID (sub)
     email = Column(String, unique=True, index=True, nullable=False)
     username = Column(String, nullable=False)
+    firstName = Column(String, nullable=True)
+    lastName = Column(String, nullable=True)
     role = Column(Enum(UserRole), nullable=False, default=UserRole.STUDENT)
     courseId = Column(UUID(as_uuid=True), ForeignKey("courses.courseId"), nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)

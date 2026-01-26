@@ -1,3 +1,54 @@
+# ----------------------------------------------------------------
+from sqlalchemy.orm import Session
+from app.models import User, UserRole
+# ZENTRALE USER-SYNC-FUNKTION
+# ----------------------------------------------------------------
+def sync_user_from_keycloak(db: Session, keycloak_user_data: dict) -> User:
+    """
+    Synchronisiert einen User aus Keycloak-Daten in die lokale DB.
+    Legt an, falls nicht vorhanden, oder updated Rolle und Namen, falls nötig.
+    Erwartet keycloak_user_data mit Feldern: id, username, email, roles (Liste), firstName, lastName
+    """
+    from app.models import User, UserRole
+    # Keycloak User ID
+    keycloak_id = keycloak_user_data.get("id") or keycloak_user_data.get("sub")
+    email = keycloak_user_data.get("email") or f"{keycloak_user_data.get('username')}@dhbw.de"
+    username = keycloak_user_data.get("username") or keycloak_id
+    keycloak_roles = keycloak_user_data.get("roles") or keycloak_user_data.get("realm_access", {}).get("roles", [])
+    app_role = map_keycloak_roles_to_app_role(keycloak_roles)
+    first_name = keycloak_user_data.get("firstName") or keycloak_user_data.get("given_name")
+    last_name = keycloak_user_data.get("lastName") or keycloak_user_data.get("family_name")
+
+    user = db.query(User).filter(User.keycloak_id == keycloak_id).first()
+    if not user:
+        user = User(
+            keycloak_id=keycloak_id,
+            email=email,
+            username=username,
+            role=app_role,
+            firstName=first_name,
+            lastName=last_name
+        )
+        db.add(user)
+        db.commit()
+        db.refresh(user)
+    else:
+        # Update Rolle, falls sie sich geändert hat
+        updated = False
+        if user.role != app_role:
+            user.role = app_role
+            updated = True
+        # Update Namen, falls sie sich geändert haben
+        if (first_name and user.firstName != first_name):
+            user.firstName = first_name
+            updated = True
+        if (last_name and user.lastName != last_name):
+            user.lastName = last_name
+            updated = True
+        if updated:
+            db.commit()
+            db.refresh(user)
+    return user
 """
 Keycloak Authentication & Authorization
 Handles token validation and user management with Keycloak
@@ -180,38 +231,25 @@ def get_current_user_keycloak(
     email = token_info.get("email")
     username = token_info.get("preferred_username")
     keycloak_roles = token_info.get("realm_access", {}).get("roles", [])
-    
+    # Try to get first/last name from all possible claim names
+    first_name = token_info.get("firstName") or token_info.get("given_name")
+    last_name = token_info.get("lastName") or token_info.get("family_name")
+
     if not keycloak_id:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Token missing user ID (sub)",
         )
-    
-    # Try to find user by keycloak_id
-    user = db.query(User).filter(User.keycloak_id == keycloak_id).first()
-    
-    if not user:
-        # Just-in-Time User Provisioning: Create user if not exists
-        app_role = map_keycloak_roles_to_app_role(keycloak_roles)
-        
-        user = User(
-            keycloak_id=keycloak_id,
-            email=email or f"{username}@dhbw.de",  # Fallback email
-            username=username or keycloak_id,
-            role=app_role,
-            password=None,  # No password for Keycloak users
-        )
-        db.add(user)
-        db.commit()
-        db.refresh(user)
-    else:
-        # Update role if changed in Keycloak
-        app_role = map_keycloak_roles_to_app_role(keycloak_roles)
-        if user.role != app_role:
-            user.role = app_role
-            db.commit()
-            db.refresh(user)
-    
+
+    # Zentrale Sync-Funktion nutzen
+    user = sync_user_from_keycloak(db, {
+        "id": keycloak_id,
+        "email": email,
+        "username": username,
+        "roles": keycloak_roles,
+        "firstName": first_name,
+        "lastName": last_name
+    })
     return user
 
 # ----------------------------------------------------------------
