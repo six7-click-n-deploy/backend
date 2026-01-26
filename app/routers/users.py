@@ -9,7 +9,7 @@ from app.schemas import (
     UserResponse, UserWithCourse, UserUpdate,
     UserStatistics
 )
-from app.utils.keycloak_auth import get_current_user_keycloak, search_keycloak_users
+from app.utils.keycloak_auth import get_current_user_keycloak, search_keycloak_users, get_keycloak_users_by_ids
 from app.utils.permissions import get_current_admin, get_current_teacher_or_admin, ensure_resource_access
 from app.crud import users as crud_users
 from app.crud import apps as crud_apps
@@ -42,7 +42,37 @@ def list_users(
     - **Requires**: TEACHER or ADMIN role
     """
     users = crud_users.get_users(db, skip=skip, limit=limit, role=role, course_id=course_id)
-    return users
+    # Enrich users with Keycloak names when keycloak_id is present
+    kc_ids = [u.keycloak_id for u in users if getattr(u, 'keycloak_id', None)]
+    kc_map = {}
+    if kc_ids:
+        try:
+            kc_map = get_keycloak_users_by_ids(kc_ids)
+        except HTTPException:
+            # If enrichment fails, continue returning base users
+            kc_map = {}
+
+    result = []
+    for u in users:
+        user_obj = {
+            "userId": u.userId,
+            "email": u.email,
+            "username": u.username,
+            "role": u.role,
+            "courseId": u.courseId,
+            "created_at": u.created_at,
+            "keycloak_id": getattr(u, 'keycloak_id', None),
+            # default empty strings if not available
+            "firstName": None,
+            "lastName": None,
+        }
+        if user_obj["keycloak_id"] and user_obj["keycloak_id"] in kc_map:
+            kc = kc_map[user_obj["keycloak_id"]]
+            user_obj["firstName"] = kc.get("firstName")
+            user_obj["lastName"] = kc.get("lastName")
+        result.append(user_obj)
+
+    return result
 
 # ----------------------------------------------------------------
 # SEARCH USERS FROM KEYCLOAK

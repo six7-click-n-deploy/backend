@@ -303,3 +303,37 @@ def search_keycloak_users(search_query: str, max_results: int = 10) -> list[dict
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to search Keycloak users: {str(e)}"
         )
+
+
+def get_keycloak_users_by_ids(ids: list[str]) -> dict:
+    """
+    Fetch Keycloak user info for a list of Keycloak IDs.
+    Returns a mapping id -> simplified user dict {id, username, email, firstName, lastName}
+    """
+    result: dict = {}
+    if not ids:
+        return result
+    try:
+        kc = get_keycloak_admin()
+        for kid in ids:
+            try:
+                user = kc.get_user(kid)
+            except Exception:
+                # Some Keycloak clients expose get_user or require different call; try get_users fallback
+                try:
+                    users = kc.get_users({"search": kid, "max": 1})
+                    user = users[0] if users else None
+                except Exception:
+                    user = None
+            if not user:
+                continue
+            result[user.get("id") or kid] = {
+                "id": user.get("id") or kid,
+                "username": user.get("username"),
+                "email": user.get("email"),
+                "firstName": user.get("firstName", ""),
+                "lastName": user.get("lastName", ""),
+            }
+        return result
+    except Exception as e:
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Failed to fetch Keycloak users: {str(e)}")

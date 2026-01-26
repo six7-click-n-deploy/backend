@@ -26,6 +26,9 @@ class UserResponse(UserBase):
     userId: UUID
     role: UserRole
     courseId: Optional[UUID] = None
+    keycloak_id: Optional[str] = None
+    firstName: Optional[str] = None
+    lastName: Optional[str] = None
     created_at: datetime
     
     model_config = ConfigDict(from_attributes=True)
