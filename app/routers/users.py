@@ -102,34 +102,15 @@ def search_users_keycloak(
             detail="Search query must be at least 2 characters"
         )
     
-    from app.schemas import UserCreate
-    from app.crud.users import get_user_by_username, get_user_by_email, create_user
-    from app.models import UserRole
     from app.database import get_db
     db = next(get_db())
+    from app.utils.keycloak_auth import sync_user_from_keycloak
 
     keycloak_users = search_keycloak_users(query, limit)
     results = []
-    from app.utils.keycloak_auth import map_keycloak_roles_to_app_role
     for kc_user in keycloak_users:
-        db_user = get_user_by_username(db, kc_user.get("username"))
-        if not db_user and kc_user.get("email"):
-            db_user = get_user_by_email(db, kc_user.get("email"))
-        if not db_user:
-            # Rolle aus Keycloak-Rollen bestimmen (wie beim Login)
-            keycloak_roles = kc_user.get("roles", [])
-            app_role = map_keycloak_roles_to_app_role(keycloak_roles)
-            # User wie beim Login anlegen
-            db_user = User(
-                keycloak_id=kc_user.get("id"),
-                email=kc_user.get("email") or f"{kc_user.get('username')}@dhbw.de",
-                username=kc_user.get("username") or kc_user.get("id"),
-                role=app_role,
-                password=None,
-            )
-            db.add(db_user)
-            db.commit()
-            db.refresh(db_user)
+        # User in lokaler DB anlegen/aktualisieren (zentral)
+        db_user = sync_user_from_keycloak(db, kc_user)
         results.append({
             "userId": db_user.userId,
             "email": db_user.email,
