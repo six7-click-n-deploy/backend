@@ -52,27 +52,30 @@ async def get_quota_overview():
         project_id = conn.current_project_id
         
         # === COMPUTE QUOTAS ===
-        compute_limits = conn.compute.get_quota_set(project_id)
-        compute_usage = conn.compute.get_limits()
-        
-        compute = ComputeQuotas(
-            instances=QuotaItem(
-                used=compute_usage.absolute.total_instances_used,
-                limit=compute_limits.instances,
-                available=compute_limits.instances - compute_usage.absolute.total_instances_used
-            ),
-            vcpus=QuotaItem(
-                used=compute_usage.absolute.total_cores_used,
-                limit=compute_limits.cores,
-                available=compute_limits.cores - compute_usage.absolute.total_cores_used
-            ),
-            ram=QuotaItem(
-                used=compute_usage.absolute.total_ram_used,
-                limit=compute_limits.ram,
-                available=compute_limits.ram - compute_usage.absolute.total_ram_used,
-                unit="MB"
+        try:
+            compute_limits = conn.compute.get_quota_set(project_id)
+            compute_usage = conn.compute.get_limits()
+            
+            compute = ComputeQuotas(
+                instances=QuotaItem(
+                    used=getattr(compute_usage.absolute, 'total_instances_used', 0),
+                    limit=getattr(compute_limits, 'instances', 0),
+                    available=getattr(compute_limits, 'instances', 0) - getattr(compute_usage.absolute, 'total_instances_used', 0)
+                ),
+                vcpus=QuotaItem(
+                    used=getattr(compute_usage.absolute, 'total_cores_used', 0),
+                    limit=getattr(compute_limits, 'cores', 0),
+                    available=getattr(compute_limits, 'cores', 0) - getattr(compute_usage.absolute, 'total_cores_used', 0)
+                ),
+                ram=QuotaItem(
+                    used=getattr(compute_usage.absolute, 'total_ram_used', 0),
+                    limit=getattr(compute_limits, 'ram', 0),
+                    available=getattr(compute_limits, 'ram', 0) - getattr(compute_usage.absolute, 'total_ram_used', 0),
+                    unit="MB"
+                )
             )
-        )
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Failed to fetch compute quotas: {str(e)}")
         
         # === STORAGE QUOTAS ===
         volume_limits = conn.volume.get_quota_set(project_id)
