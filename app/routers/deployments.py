@@ -245,7 +245,7 @@ def create_deployment(
         }
         """
         # TODO: Verify and validate user input variables against structure definition
-        user_vars = db_deployment.userInputVar if isinstance(db_deployment.userInputVar, dict) else {}
+        user_vars = json.loads(db_deployment.userInputVar) if db_deployment.userInputVar else {}
     except Exception:
         user_vars = {}
     
