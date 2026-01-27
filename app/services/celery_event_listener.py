@@ -149,118 +149,111 @@ def start_event_listener():
                     "status": TaskStatus.RUNNING,
                     "started_at": datetime.utcnow()
                 }
-            
+
             elif event_type == 'task-succeeded':
                 logger.info(f"Task {celery_task_id} succeeded")
                 result = event.get('result', {})
-                
+                print(event)
+                print(result)
+
+
+                logger.info(f"[DEBUG] Raw event result: {result}")
+                # Schreibe das komplette result als JSON-String in logs
+                if not isinstance(result, str):
+                    try:
+                        logs_str = json.dumps(result, ensure_ascii=False)
+                    except Exception as e:
+                        logger.warning(f"Could not serialize result for {celery_task_id}: {e}")
+                        logs_str = str(result)
+                else:
+                    logs_str = result
+
+                # tf_state und outputs extrahieren und IMMER als String speichern
+                tf_state = None
+                outputs = None
+                if isinstance(result, dict):
+                    tf_state = result.get('tf_state')
+                    if tf_state is not None and not isinstance(tf_state, str):
+                        try:
+                            tf_state = json.dumps(tf_state, ensure_ascii=False)
+                        except Exception:
+                            tf_state = str(tf_state)
+                    outputs = result.get('terraform_outputs')
+                    if outputs is not None and not isinstance(outputs, str):
+                        try:
+                            outputs = json.dumps(outputs, ensure_ascii=False)
+                        except Exception:
+                            outputs = str(outputs)
+
+                logger.info(f"[DEBUG] tf_state for DB: {tf_state}")
+                logger.info(f"[DEBUG] outputs for DB: {outputs}")
+
                 update_data = {
                     "status": TaskStatus.SUCCESS,
-                    "finished_at": datetime.utcnow()
+                    "finished_at": datetime.utcnow(),
+                    "logs": logs_str,
+                    "tf_state": tf_state,
+                    "outputs": outputs,
                 }
-                
-                # Extract result data
-                if isinstance(result, dict):
-                    logs_data = None
-                    
-                    if 'logs' in result:
-                        logs_data = result['logs']
-                        update_data['logs'] = json.dumps(logs_data) if isinstance(logs_data, list) else str(logs_data)
-                    
-                    if 'tf_state' in result:
-                        update_data['tf_state'] = result['tf_state']
-                    
-                    if 'terraform_outputs' in result:
-                        tf_outputs = result['terraform_outputs']
-                        if isinstance(tf_outputs, dict):
-                            update_data['outputs'] = json.dumps(tf_outputs, indent=2)
-                        else:
-                            update_data['outputs'] = str(tf_outputs)
-                    
-                    # Send structured logs to Elasticsearch
-                    if logs_data and isinstance(logs_data, list):
-                        pass
-                    
-                    if 'commit_info' in result and result['commit_info']:
-                        commit = result['commit_info']
-                        if isinstance(commit, dict):
-                            commit_str = f"\n📝 Commit: {commit.get('hash', 'N/A')[:8]}"
-                            commit_str += f"\n   Message: {commit.get('message', 'N/A')}"
-                            commit_str += f"\n   Author: {commit.get('author', 'N/A')}"
-                            current_logs = update_data.get('logs', '')
-                            update_data['logs'] = current_logs + commit_str
+                logger.info(f"[SUCCESS] Update data for {celery_task_id}: {update_data}")
             
+
             elif event_type == 'task-failed':
                 logger.info(f"Task {celery_task_id} failed")
                 exception_type = event.get('exception', 'Unknown error')
                 traceback = event.get('traceback', '')
-                
                 update_data = {
                     "status": TaskStatus.FAILED,
-                    "finished_at": datetime.utcnow()
+                    "finished_at": datetime.utcnow(),
+                    "logs": None,
+                    "tf_state": None,
+                    "outputs": None,
                 }
-                
                 # Try to extract structured failure data from traceback
                 try:
                     import re
-                    
-                    # Look for the JSON in the traceback - the Failure exception contains the JSON
                     match = re.search(r"Failure\('(.+)'\)", traceback, re.DOTALL)
                     if match:
                         json_str = match.group(1)
-                        
-                        # Try to parse as JSON directly, if not, unescape
                         try:
                             failure_data = json.loads(json_str)
                         except json.JSONDecodeError:
                             json_str = json_str.encode('utf-8').decode('unicode_escape')
                             failure_data = json.loads(json_str)
-                        
-                        # Format logs
-                        logs_data = None
-                        if 'logs' in failure_data and failure_data['logs']:
-                            logs_data = failure_data['logs']
+                        # logs
+                        logs_data = failure_data.get('logs')
+                        if logs_data is not None:
                             update_data['logs'] = json.dumps(logs_data) if isinstance(logs_data, list) else str(logs_data)
-                        
-                        # Send to Elasticsearch
-                        if logs_data and isinstance(logs_data, list):
-                            pass
-                        
-                        # Add error message
+                        # error
                         if 'error' in failure_data:
-                            current_logs = update_data.get('logs', '')
+                            current_logs = update_data.get('logs', '') or ''
                             update_data['logs'] = current_logs + f"\n\n❌ Error: {failure_data['error']}"
-                        
-                        # Extract tf_state
-                        if 'tf_state' in failure_data and failure_data['tf_state']:
+                        # tf_state
+                        if 'tf_state' in failure_data:
                             update_data['tf_state'] = failure_data['tf_state']
-                        
-                        # Extract commit_info
+                        # commit_info
                         if 'commit_info' in failure_data and failure_data['commit_info']:
                             commit = failure_data['commit_info']
                             if isinstance(commit, dict):
                                 commit_str = f"\n📝 Commit: {commit.get('hash', 'N/A')[:8]}"
                                 commit_str += f"\n   Message: {commit.get('message', 'N/A')}"
                                 commit_str += f"\n   Author: {commit.get('author', 'N/A')}"
-                                current_logs = update_data.get('logs', '')
+                                current_logs = update_data.get('logs', '') or ''
                                 update_data['logs'] = current_logs + commit_str
-                        
-                        # Extract terraform_outputs
-                        if 'terraform_outputs' in failure_data and failure_data['terraform_outputs']:
+                        # terraform_outputs
+                        if 'terraform_outputs' in failure_data:
                             tf_outputs = failure_data['terraform_outputs']
                             if isinstance(tf_outputs, dict):
                                 update_data['outputs'] = json.dumps(tf_outputs, indent=2)
                             else:
                                 update_data['outputs'] = str(tf_outputs)
-                        
-                        logger.info(f"Extracted structured failure data for task {celery_task_id}")
+                        logger.info(f"[FAILED] Extracted structured failure data for {celery_task_id}: {update_data}")
                     else:
                         raise ValueError("Not structured failure format")
-                    
                 except Exception as parse_error:
-                    # Not structured format - use simple error message
                     logger.warning(f"Could not parse structured failure: {parse_error}")
                     update_data['logs'] = f"Task failed: {exception_type}\n{traceback}"
+                logger.info(f"[FAILED] Update data for {celery_task_id}: {update_data}")
             
             elif event_type == 'task-revoked':
                 logger.info(f"Task {celery_task_id} revoked")
