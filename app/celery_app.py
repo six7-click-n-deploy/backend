@@ -5,7 +5,7 @@ celery_app = Celery("worker", broker=settings.CELERY_BROKER_URL)  # ← KEIN inc
 
 celery_app.conf.update(
     broker_url=settings.CELERY_BROKER_URL,
-    result_backend=f"db+{settings.DATABASE_URL}",
+    result_backend=settings.CELERY_RESULT_BACKEND,
     
     task_serializer="json",
     accept_content=["json"],
