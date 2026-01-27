@@ -5,7 +5,7 @@ import logging
 import threading
 
 from app.database import engine, Base
-from app.routers import auth_keycloak, users, courses, apps, deployments, teams, tasks
+from app.routers import auth_keycloak, users, courses, apps, deployments, teams, tasks, quotas
 from app.config import settings
 from app.services.celery_event_listener import start_event_listener
 
@@ -64,6 +64,7 @@ app.include_router(apps.router, prefix="/apps", tags=["Apps"])
 app.include_router(deployments.router, prefix="/deployments", tags=["Deployments"])
 app.include_router(tasks.router, prefix="/tasks", tags=["Tasks"])
 app.include_router(teams.router, prefix="/teams", tags=["Teams"])
+app.include_router(quotas.router, prefix="/quotas", tags=["Quotas"])
 
 # ----------------------------------------------------------------
 # HEALTH CHECK
