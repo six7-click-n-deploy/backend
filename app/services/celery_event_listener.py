@@ -8,6 +8,7 @@ Worker sends events, backend receives and processes them.
 import logging
 import json
 import re
+import ast
 from datetime import datetime
 from celery.events import EventReceiver
 from sqlalchemy.orm import Session
@@ -15,6 +16,8 @@ from app.celery_app import celery_app
 from app.database import SessionLocal
 from app.crud import tasks as crud_tasks
 from app.models import TaskStatus, Task, Deployment
+from celery.result import AsyncResult
+
 
 logger = logging.getLogger(__name__)
 
@@ -152,51 +155,42 @@ def start_event_listener():
 
             elif event_type == 'task-succeeded':
                 logger.info(f"Task {celery_task_id} succeeded")
-                result = event.get('result', {})
-                print(event)
-                print(result)
-
-
-                logger.info(f"[DEBUG] Raw event result: {result}")
-                # Schreibe das komplette result als JSON-String in logs
-                if not isinstance(result, str):
-                    try:
-                        logs_str = json.dumps(result, ensure_ascii=False)
-                    except Exception as e:
-                        logger.warning(f"Could not serialize result for {celery_task_id}: {e}")
-                        logs_str = str(result)
-                else:
-                    logs_str = result
-
-                # tf_state und outputs extrahieren und IMMER als String speichern
-                tf_state = None
-                outputs = None
+            
+                # Hole das VOLLSTÄNDIGE Result vom Backend
+                async_result = AsyncResult(celery_task_id, app=celery_app)
+                result = async_result.result  # ← Hier ist das vollständige Result!
+                print(f"DEBUG: result type: {type(result)}")
+                print(f"DEBUG: result: {result}")
+                
+                # Jetzt kannst du damit arbeiten
                 if isinstance(result, dict):
+                    logs_data = result.get('logs')
                     tf_state = result.get('tf_state')
-                    if tf_state is not None and not isinstance(tf_state, str):
-                        try:
-                            tf_state = json.dumps(tf_state, ensure_ascii=False)
-                        except Exception:
-                            tf_state = str(tf_state)
                     outputs = result.get('terraform_outputs')
-                    if outputs is not None and not isinstance(outputs, str):
-                        try:
-                            outputs = json.dumps(outputs, ensure_ascii=False)
-                        except Exception:
-                            outputs = str(outputs)
-
-                logger.info(f"[DEBUG] tf_state for DB: {tf_state}")
-                logger.info(f"[DEBUG] outputs for DB: {outputs}")
-
+                    print(f"DEBUG: logs_data type: {type(logs_data)}, len: {len(logs_data) if logs_data else 'None'}")
+                    print(f"DEBUG: tf_state type: {type(tf_state)}, len: {len(tf_state) if tf_state else 'None'}")
+                    print(f"DEBUG: outputs type: {type(outputs)}, keys: {list(outputs.keys()) if outputs else 'None'}")
+                else:
+                    logs_data = None
+                    tf_state = None
+                    outputs = None
+                    print("DEBUG: result is not a dict!")
+                
+                # Logs sind jetzt entweder schon ein String oder ein List
+                if isinstance(logs_data, list):
+                    logs_str = json.dumps(logs_data, ensure_ascii=False)
+                elif isinstance(logs_data, str):
+                    logs_str = logs_data
+                else:
+                    logs_str = None
+                
                 update_data = {
                     "status": TaskStatus.SUCCESS,
                     "finished_at": datetime.utcnow(),
                     "logs": logs_str,
-                    "tf_state": tf_state,
-                    "outputs": outputs,
+                    "tf_state": tf_state if isinstance(tf_state, str) else json.dumps(tf_state) if tf_state else None,
+                    "outputs": outputs if isinstance(outputs, str) else json.dumps(outputs) if outputs else None,
                 }
-                logger.info(f"[SUCCESS] Update data for {celery_task_id}: {update_data}")
-            
 
             elif event_type == 'task-failed':
                 logger.info(f"Task {celery_task_id} failed")
