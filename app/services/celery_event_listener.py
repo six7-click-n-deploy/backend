@@ -192,27 +192,29 @@ def start_event_listener():
             
             elif event_type == 'task-failed':
                 logger.info(f"Task {celery_task_id} failed")
-                exception_msg = event.get('exception', 'Unknown error')
+                exception_type = event.get('exception', 'Unknown error')
+                traceback = event.get('traceback', '')
                 
                 update_data = {
                     "status": TaskStatus.FAILED,
                     "finished_at": datetime.utcnow()
                 }
                 
-                # Try to extract structured failure data from exception message
+                # Try to extract structured failure data from traceback
                 try:
                     import re
                     
-                    # Exception format: JSON string in the message
-                    match = re.search(r"DeploymentFailure\('(.+)'\)$", exception_msg, re.DOTALL)
+                    # Look for the JSON in the traceback - the Failure exception contains the JSON
+                    match = re.search(r"Failure\('(.+)'\)", traceback, re.DOTALL)
                     if match:
                         json_str = match.group(1)
                         
-                        # Unescape the JSON string properly
-                        # The string comes escaped from Python, so we need to unescape it
-                        json_str = json_str.encode('utf-8').decode('unicode_escape')
-                        
-                        failure_data = json.loads(json_str)
+                        # Try to parse as JSON directly, if not, unescape
+                        try:
+                            failure_data = json.loads(json_str)
+                        except json.JSONDecodeError:
+                            json_str = json_str.encode('utf-8').decode('unicode_escape')
+                            failure_data = json.loads(json_str)
                         
                         # Format logs
                         logs_data = None
@@ -258,7 +260,7 @@ def start_event_listener():
                 except Exception as parse_error:
                     # Not structured format - use simple error message
                     logger.warning(f"Could not parse structured failure: {parse_error}")
-                    update_data['logs'] = f"Task failed: {exception_msg}"
+                    update_data['logs'] = f"Task failed: {exception_type}\n{traceback}"
             
             elif event_type == 'task-revoked':
                 logger.info(f"Task {celery_task_id} revoked")
