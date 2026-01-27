@@ -65,13 +65,21 @@ def list_deployments(
     for deployment in deployments:
         status_value = crud_deployments.get_deployment_status(db, deployment.deploymentId)
         created_at = crud_deployments.get_deployment_created_at(db, deployment.deploymentId)
+        # Parse userInputVar JSON string back to dict if it exists
+        user_input_var_parsed = None
+        if deployment.userInputVar:
+            try:
+                user_input_var_parsed = json.loads(deployment.userInputVar)
+            except json.JSONDecodeError:
+                user_input_var_parsed = None
+        
         result.append(DeploymentResponse(
             deploymentId=deployment.deploymentId,
             name=deployment.name,
             appId=deployment.appId,
             userId=deployment.userId,
             releaseTag=deployment.releaseTag,
-            userInputVar=deployment.userInputVar,
+            userInputVar=user_input_var_parsed,
             status=status_value,
             created_at=created_at,
         ))
@@ -150,13 +158,21 @@ def get_deployment(
     status_value = crud_deployments.get_deployment_status(db, deployment_id)
     created_at = crud_deployments.get_deployment_created_at(db, deployment_id)
     
+    # Parse userInputVar JSON string back to dict if it exists
+    user_input_var_parsed = None
+    if deployment.userInputVar:
+        try:
+            user_input_var_parsed = json.loads(deployment.userInputVar)
+        except json.JSONDecodeError:
+            user_input_var_parsed = None
+    
     return DeploymentDetail(
         deploymentId=deployment.deploymentId,
         name=deployment.name,
         appId=deployment.appId,
         userId=deployment.userId,
         releaseTag=deployment.releaseTag,
-        userInputVar=deployment.userInputVar,
+        userInputVar=user_input_var_parsed,
         status=status_value,
         created_at=created_at,
         user=deployment.user,
@@ -188,6 +204,7 @@ def create_deployment(
     user_ids_in_deployment = set()
     
     if deployment.teams:
+        # Teams data should already have correct userIds from frontend
         teams_data = [
             {"name": team.name, "userIds": team.userIds}
             for team in deployment.teams
@@ -228,7 +245,7 @@ def create_deployment(
         }
         """
         # TODO: Verify and validate user input variables against structure definition
-        user_vars = json.loads(db_deployment.userInputVar) if db_deployment.userInputVar else {}
+        user_vars = db_deployment.userInputVar if isinstance(db_deployment.userInputVar, dict) else {}
     except Exception:
         user_vars = {}
     
@@ -262,7 +279,28 @@ def create_deployment(
         ],
     )
 
-    return db_deployment
+    # Get status and created_at from the task we just created
+    status_value = crud_deployments.get_deployment_status(db, db_deployment.deploymentId)
+    created_at = crud_deployments.get_deployment_created_at(db, db_deployment.deploymentId)
+
+    # Parse userInputVar for response
+    user_input_var_parsed = None
+    if db_deployment.userInputVar:
+        try:
+            user_input_var_parsed = json.loads(db_deployment.userInputVar)
+        except json.JSONDecodeError:
+            user_input_var_parsed = None
+
+    return DeploymentResponse(
+        deploymentId=db_deployment.deploymentId,
+        name=db_deployment.name,
+        appId=db_deployment.appId,
+        userId=db_deployment.userId,
+        releaseTag=db_deployment.releaseTag,
+        userInputVar=user_input_var_parsed,
+        status=status_value,
+        created_at=created_at,
+    )
 
 
 # ----------------------------------------------------------------
