@@ -76,7 +76,9 @@ def _parse_terraform_variables(file_path: str) -> List[Dict[str, Any]]:
     for match in re.finditer(pattern, content, re.DOTALL):
         var_name = match.group(1)
         var_block = match.group(2)
-        
+        # Filter: users und image_name rauslassen
+        if var_name == "users" or var_name == "image_name":
+            continue
         # Extract type
         type_match = re.search(r'type\s*=\s*([^\n]+)', var_block)
         var_type = type_match.group(1).strip() if type_match else "string"
@@ -128,7 +130,9 @@ def _parse_packer_variables(file_path: str) -> List[Dict[str, Any]]:
     for match in re.finditer(pattern, content, re.DOTALL):
         var_name = match.group(1)
         var_block = match.group(2)
-        
+        # Filter: image_name rauslassen
+        if var_name == "image_name":
+            continue
         # Extract type
         type_match = re.search(r'type\s*=\s*([^\n]+)', var_block)
         var_type = type_match.group(1).strip() if type_match else "string"

@@ -17,6 +17,7 @@ class Settings(BaseSettings):
     
     # Celery (optional - only needed for API runtime, not for migrations)
     CELERY_BROKER_URL: str = "amqp://admin:admin@rabbitmq:5672/"
+    CELERY_RESULT_BACKEND: str = "redis://redis:6379/0"
 
     # Git
     TEMP_REPO_BASE_PATH: str = "/tmp/worker_repos"
