@@ -106,7 +106,7 @@ class AppWithVersions(AppWithUser):
 # ----------------------------------------------------------------
 class Team(BaseModel):
     name: str
-    userIds: List[UUID] = []
+    userIds: List[str] = []
 
 class DeploymentBase(BaseModel):
     name: str
@@ -114,14 +114,14 @@ class DeploymentBase(BaseModel):
 
 class DeploymentCreate(DeploymentBase):
     releaseTag: Optional[str] = None
-    userInputVar: Optional[str] = None
+    userInputVar: Optional[Dict[str, Any]] = None
     teams: List[Team] = []
 
 class DeploymentResponse(DeploymentBase):
     deploymentId: UUID
     userId: UUID
     releaseTag: Optional[str] = None
-    userInputVar: Optional[str] = None
+    userInputVar: Optional[Dict[str, Any]] = None
     status: Optional[str] = None  # From latest task
     created_at: Optional[datetime] = None
     

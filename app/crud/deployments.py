@@ -166,12 +166,17 @@ def get_deployments_with_status(db: Session, deployments: List[Deployment]) -> L
 
 def create_deployment(db: Session, deployment: DeploymentCreate, user_id: UUID) -> Deployment:
     """Create a new deployment"""
+    # Convert userInputVar dict to JSON string for database storage
+    user_input_var_json = None
+    if deployment.userInputVar is not None:
+        user_input_var_json = json.dumps(deployment.userInputVar)
+    
     db_deployment = Deployment(
         name=deployment.name,
         appId=deployment.appId,
         userId=user_id,
         releaseTag=deployment.releaseTag,
-        userInputVar=deployment.userInputVar,
+        userInputVar=user_input_var_json,
     )
     db.add(db_deployment)
     db.commit()
