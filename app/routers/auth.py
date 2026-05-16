@@ -1,12 +1,9 @@
-from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy.orm import Session
+from fastapi import APIRouter, Depends
 
-from app.database import get_db
-from app.models import User, UserRole
-from app.schemas import UserCreate, Token, UserResponse
+from app.models import User
+from app.schemas import Token, UserResponse
 from app.utils.auth import create_access_token
 from app.utils.keycloak_auth import get_current_user_keycloak
-from app.crud import users as crud_users
 
 router = APIRouter()
 
@@ -32,7 +29,7 @@ def refresh_token(current_user: User = Depends(get_current_user_keycloak)):
     - Requires valid JWT token
     """
     access_token = create_access_token(data={"sub": current_user.username})
-    
+
     return {
         "access_token": access_token,
         "token_type": "bearer"

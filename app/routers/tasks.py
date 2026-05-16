@@ -5,16 +5,16 @@ API endpoints for querying task status and managing tasks.
 Tasks are created by deployments, this router provides read-only access to task information.
 """
 
-from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy.orm import Session
-from typing import List
 from uuid import UUID
 
+from fastapi import APIRouter, Depends, HTTPException, status
+from sqlalchemy.orm import Session
+
+from app.crud import tasks as crud_tasks
 from app.database import get_db
 from app.models import User
 from app.schemas import TaskResponse
 from app.utils.keycloak_auth import get_current_user_keycloak
-from app.crud import tasks as crud_tasks
 
 router = APIRouter()
 
@@ -22,7 +22,7 @@ router = APIRouter()
 # ----------------------------------------------------------------
 # GET TASKS FOR DEPLOYMENT
 # ----------------------------------------------------------------
-@router.get("/deployment/{deployment_id}", response_model=List[TaskResponse])
+@router.get("/deployment/{deployment_id}", response_model=list[TaskResponse])
 def get_deployment_tasks(
     deployment_id: UUID,
     db: Session = Depends(get_db),

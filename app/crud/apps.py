@@ -1,28 +1,28 @@
-from sqlalchemy.orm import Session
-from typing import List, Optional
 from uuid import UUID
+
+from sqlalchemy.orm import Session
 
 from app.models import App
 from app.schemas import AppCreate, AppUpdate
 
 
-def get_app(db: Session, app_id: UUID) -> Optional[App]:
+def get_app(db: Session, app_id: UUID) -> App | None:
     """Get app by ID"""
     return db.query(App).filter(App.appId == app_id).first()
 
 
 def get_apps(
-    db: Session, 
-    skip: int = 0, 
+    db: Session,
+    skip: int = 0,
     limit: int = 100,
-    user_id: Optional[UUID] = None
-) -> List[App]:
+    user_id: UUID | None = None
+) -> list[App]:
     """Get apps with optional user filter"""
     query = db.query(App)
-    
+
     if user_id:
         query = query.filter(App.userId == user_id)
-    
+
     return query.offset(skip).limit(limit).all()
 
 
@@ -40,16 +40,16 @@ def create_app(db: Session, app: AppCreate, user_id: UUID) -> App:
     return db_app
 
 
-def update_app(db: Session, app_id: UUID, app_update: AppUpdate) -> Optional[App]:
+def update_app(db: Session, app_id: UUID, app_update: AppUpdate) -> App | None:
     """Update app information"""
     db_app = get_app(db, app_id)
     if not db_app:
         return None
-    
+
     update_data = app_update.model_dump(exclude_unset=True)
     for field, value in update_data.items():
         setattr(db_app, field, value)
-    
+
     db.commit()
     db.refresh(db_app)
     return db_app
@@ -60,7 +60,7 @@ def delete_app(db: Session, app_id: UUID) -> bool:
     db_app = get_app(db, app_id)
     if not db_app:
         return False
-    
+
     db.delete(db_app)
     db.commit()
     return True

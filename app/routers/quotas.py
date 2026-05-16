@@ -1,5 +1,5 @@
-from fastapi import APIRouter, HTTPException
 import openstack
+from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 router = APIRouter()
@@ -43,19 +43,19 @@ def get_openstack_conn():
 async def get_quota_overview():
     """
     Holt OpenStack Quota-Übersicht für Compute, Storage und Network.
-    
+
     Returns:
         QuotaOverviewResponse mit used/limit/available für alle Ressourcen
     """
     try:
         conn = get_openstack_conn()
         project_id = conn.current_project_id
-        
+
         # === COMPUTE QUOTAS ===
         try:
             compute_limits = conn.compute.get_quota_set(project_id)
             compute_usage = conn.compute.get_limits()
-            
+
             compute = ComputeQuotas(
                 instances=QuotaItem(
                     used=getattr(compute_usage.absolute, 'total_instances_used', 0),
@@ -75,14 +75,14 @@ async def get_quota_overview():
                 )
             )
         except Exception as e:
-            raise HTTPException(status_code=500, detail=f"Failed to fetch compute quotas: {str(e)}")
-        
+            raise HTTPException(status_code=500, detail=f"Failed to fetch compute quotas: {str(e)}") from e
+
         # === STORAGE QUOTAS ===
         volume_limits = conn.volume.get_quota_set(project_id)
         volumes = list(conn.volume.volumes())
         snapshots = list(conn.volume.snapshots())
         total_gb_used = sum(v.size for v in volumes)
-        
+
         storage = StorageQuotas(
             volumes=QuotaItem(
                 used=len(volumes),
@@ -101,23 +101,23 @@ async def get_quota_overview():
                 unit="GB"
             )
         )
-        
+
         # === NETWORK QUOTAS ===
         network_limits = conn.network.get_quota(project_id)
-        
+
         # Zähle tatsächliche Ressourcen-Nutzung
         floating_ips_used = len(list(conn.network.ips()))
         security_groups_used = len(list(conn.network.security_groups()))
         networks_used = len(list(conn.network.networks()))
         ports_used = len(list(conn.network.ports()))
         routers_used = len(list(conn.network.routers()))
-        
+
         # Security Group Rules über alle Security Groups zählen
         sg_rules_used = sum(
             len(list(conn.network.security_group_rules(security_group_id=sg.id)))
             for sg in conn.network.security_groups()
         )
-        
+
         network = NetworkQuotas(
             floating_ips=QuotaItem(
                 used=floating_ips_used,
@@ -150,11 +150,11 @@ async def get_quota_overview():
                 available=getattr(network_limits, 'router', 10) - routers_used
             )
         )
-        
+
         return QuotaOverviewResponse(compute=compute, storage=storage, network=network)
-        
+
     except Exception as e:
         raise HTTPException(
             status_code=500,
             detail=f"Failed to fetch quotas: {str(e)}"
-        )
+        ) from e

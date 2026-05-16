@@ -5,19 +5,19 @@ Listens to Celery events from RabbitMQ and updates task status in database.
 Worker sends events, backend receives and processes them.
 """
 
-import logging
 import json
+import logging
 import re
-import ast
 from datetime import datetime
-from celery.events import EventReceiver
-from sqlalchemy.orm import Session
-from app.celery_app import celery_app
-from app.database import SessionLocal
-from app.crud import tasks as crud_tasks
-from app.models import TaskStatus, Task, Deployment
-from celery.result import AsyncResult
 
+from celery.events import EventReceiver
+from celery.result import AsyncResult
+from sqlalchemy.orm import Session
+
+from app.celery_app import celery_app
+from app.crud import tasks as crud_tasks
+from app.database import SessionLocal
+from app.models import TaskStatus
 
 logger = logging.getLogger(__name__)
 
@@ -27,10 +27,10 @@ def clean_log_line(line: str) -> str:
     # Remove ANSI color codes
     ansi_escape = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
     line = ansi_escape.sub('', line)
-    
+
     # Normalize escaped quotes
     line = line.replace('""', '"')
-    
+
     return line
 
 
@@ -57,7 +57,7 @@ def filter_logs(text: str, max_lines: int = 100) -> str:
     - Limit to max_lines if too long
     """
     lines = text.split('\n')
-    
+
     # Filter verbose lines
     filtered = []
     for line in lines:
@@ -65,13 +65,13 @@ def filter_logs(text: str, max_lines: int = 100) -> str:
             cleaned = clean_log_line(line)
             if cleaned.strip():
                 filtered.append(cleaned)
-    
+
     # If still too long, keep important parts
     if len(filtered) > max_lines:
         # Keep first 20 lines and last 30 lines
         important = filtered[:20] + ["..."] + filtered[-30:]
         return "\n".join(important)
-    
+
     return "\n".join(filtered)
 
 
@@ -85,10 +85,10 @@ def format_logs(logs_data) -> str:
                 message = entry.get("message", "")
                 level = entry.get("level", "INFO")
                 icon = _get_icon(level)
-                
+
                 # Clean up message (remove ANSI codes)
                 message = clean_log_line(message)
-                
+
                 # For long messages, truncate intelligently
                 if len(message) > 500:
                     # If it looks like multiple lines, keep the structure
@@ -99,7 +99,7 @@ def format_logs(logs_data) -> str:
                             message = filter_logs(message)
                     else:
                         message = message[:500] + "..."
-                
+
                 formatted.append(f"{icon} [{timestamp}] {message}")
             elif isinstance(entry, str):
                 formatted.append(clean_log_line(entry))
@@ -125,15 +125,15 @@ def start_event_listener():
     This runs in a background thread/process
     """
     logger.info("Starting Celery event listener...")
-    
+
     def handle_event(event):
         """Process incoming Celery events"""
         event_type = event.get('type')
         celery_task_id = event.get('uuid')
-        
+
         if not celery_task_id:
             return
-        
+
         db: Session = SessionLocal()
         try:
             # Find task by celery_task_id
@@ -141,10 +141,10 @@ def start_event_listener():
             if not tasks:
                 logger.warning(f"Task not found for celery_task_id: {celery_task_id}")
                 return
-            
+
             task = tasks[0]
             update_data = {}
-            
+
             # Handle different event types
             if event_type == 'task-started':
                 logger.info(f"Task {celery_task_id} started")
@@ -155,13 +155,13 @@ def start_event_listener():
 
             elif event_type == 'task-succeeded':
                 logger.info(f"Task {celery_task_id} succeeded")
-            
+
                 # Hole das VOLLSTÄNDIGE Result vom Backend
                 async_result = AsyncResult(celery_task_id, app=celery_app)
                 result = async_result.result  # ← Hier ist das vollständige Result!
                 print(f"DEBUG: result type: {type(result)}")
                 print(f"DEBUG: result: {result}")
-                
+
                 # Jetzt kannst du damit arbeiten
                 if isinstance(result, dict):
                     logs_data = result.get('logs')
@@ -175,7 +175,7 @@ def start_event_listener():
                     tf_state = None
                     outputs = None
                     print("DEBUG: result is not a dict!")
-                
+
                 # Logs sind jetzt entweder schon ein String oder ein List
                 if isinstance(logs_data, list):
                     logs_str = json.dumps(logs_data, ensure_ascii=False)
@@ -183,7 +183,7 @@ def start_event_listener():
                     logs_str = logs_data
                 else:
                     logs_str = None
-                
+
                 update_data = {
                     "status": TaskStatus.SUCCESS,
                     "finished_at": datetime.utcnow(),
@@ -248,25 +248,25 @@ def start_event_listener():
                     logger.warning(f"Could not parse structured failure: {parse_error}")
                     update_data['logs'] = f"Task failed: {exception_type}\n{traceback}"
                 logger.info(f"[FAILED] Update data for {celery_task_id}: {update_data}")
-            
+
             elif event_type == 'task-revoked':
                 logger.info(f"Task {celery_task_id} revoked")
                 update_data = {
                     "status": TaskStatus.CANCELLED,
                     "finished_at": datetime.utcnow()
                 }
-            
+
             # Update task in database
             if update_data:
                 crud_tasks.update_task(db, task.taskId, update_data)
                 logger.info(f"Updated task {task.taskId} from event {event_type}")
-        
+
         except Exception as e:
             logger.error(f"Error processing event {event_type} for task {celery_task_id}: {e}")
-        
+
         finally:
             db.close()
-    
+
     # Connect to RabbitMQ and listen for events
     with celery_app.connection() as connection:
         recv = EventReceiver(
@@ -278,7 +278,7 @@ def start_event_listener():
                 'task-revoked': handle_event,
             }
         )
-        
+
         logger.info("✓ Celery event listener ready, waiting for events...")
         recv.capture(limit=None, timeout=None, wakeup=True)
 

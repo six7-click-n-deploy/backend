@@ -1,8 +1,11 @@
-from pydantic import BaseModel, EmailStr, Field, ConfigDict
 from datetime import datetime
-from typing import Optional, List, Dict, Any
+from typing import Any, Optional
 from uuid import UUID
-from app.models import UserRole, TaskType, TaskStatus
+
+from pydantic import BaseModel, ConfigDict, EmailStr
+
+from app.models import TaskStatus, TaskType, UserRole
+
 
 # ----------------------------------------------------------------
 # USER SCHEMAS
@@ -13,29 +16,29 @@ class UserBase(BaseModel):
 
 class UserCreate(UserBase):
     role: UserRole = UserRole.STUDENT
-    courseId: Optional[UUID] = None
+    courseId: UUID | None = None
 
 class UserUpdate(BaseModel):
-    email: Optional[EmailStr] = None
-    username: Optional[str] = None
-    role: Optional[UserRole] = None
-    courseId: Optional[UUID] = None
+    email: EmailStr | None = None
+    username: str | None = None
+    role: UserRole | None = None
+    courseId: UUID | None = None
 
 
 class UserResponse(UserBase):
     userId: UUID
     role: UserRole
-    courseId: Optional[UUID] = None
-    keycloak_id: Optional[str] = None
-    firstName: Optional[str] = None
-    lastName: Optional[str] = None
+    courseId: UUID | None = None
+    keycloak_id: str | None = None
+    firstName: str | None = None
+    lastName: str | None = None
     created_at: datetime
-    
+
     model_config = ConfigDict(from_attributes=True)
 
 class UserWithCourse(UserResponse):
     course: Optional['CourseResponse'] = None
-    
+
     model_config = ConfigDict(from_attributes=True)
 
 class Token(BaseModel):
@@ -43,7 +46,7 @@ class Token(BaseModel):
     token_type: str
 
 class TokenData(BaseModel):
-    username: Optional[str] = None
+    username: str | None = None
 
 # ----------------------------------------------------------------
 # COURSE SCHEMAS
@@ -55,16 +58,16 @@ class CourseCreate(CourseBase):
     pass
 
 class CourseUpdate(BaseModel):
-    name: Optional[str] = None
+    name: str | None = None
 
 class CourseResponse(CourseBase):
     courseId: UUID
-    
+
     model_config = ConfigDict(from_attributes=True)
 
 class CourseWithUsers(CourseResponse):
-    users: List[UserResponse] = []
-    
+    users: list[UserResponse] = []
+
     model_config = ConfigDict(from_attributes=True)
 
 # ----------------------------------------------------------------
@@ -72,33 +75,33 @@ class CourseWithUsers(CourseResponse):
 # ----------------------------------------------------------------
 class AppBase(BaseModel):
     name: str
-    description: Optional[str] = None
-    git_link: Optional[str] = None
+    description: str | None = None
+    git_link: str | None = None
 
 class AppCreate(AppBase):
     pass
 
 class AppUpdate(BaseModel):
-    name: Optional[str] = None
-    description: Optional[str] = None
-    git_link: Optional[str] = None
-    image: Optional[bytes] = None
+    name: str | None = None
+    description: str | None = None
+    git_link: str | None = None
+    image: bytes | None = None
 
 class AppResponse(AppBase):
     appId: UUID
     userId: UUID
     created_at: datetime
-    
+
     model_config = ConfigDict(from_attributes=True)
 
 class AppWithUser(AppResponse):
     user: UserResponse
-    
+
     model_config = ConfigDict(from_attributes=True)
 
 class AppWithVersions(AppWithUser):
-    versions: List[Dict[str, str]] = []
-    
+    versions: list[dict[str, str]] = []
+
     model_config = ConfigDict(from_attributes=True)
 
 # ----------------------------------------------------------------
@@ -106,31 +109,31 @@ class AppWithVersions(AppWithUser):
 # ----------------------------------------------------------------
 class Team(BaseModel):
     name: str
-    userIds: List[str] = []
+    userIds: list[str] = []
 
 class DeploymentBase(BaseModel):
     name: str
     appId: UUID
 
 class DeploymentCreate(DeploymentBase):
-    releaseTag: Optional[str] = None
-    userInputVar: Optional[Dict[str, Any]] = None
-    teams: List[Team] = []
+    releaseTag: str | None = None
+    userInputVar: dict[str, Any] | None = None
+    teams: list[Team] = []
 
 class DeploymentResponse(DeploymentBase):
     deploymentId: UUID
     userId: UUID
-    releaseTag: Optional[str] = None
-    userInputVar: Optional[Dict[str, Any]] = None
-    status: Optional[str] = None  # From latest task
-    created_at: Optional[datetime] = None
-    
+    releaseTag: str | None = None
+    userInputVar: dict[str, Any] | None = None
+    status: str | None = None  # From latest task
+    created_at: datetime | None = None
+
     model_config = ConfigDict(from_attributes=True)
 
 class DeploymentWithRelations(DeploymentResponse):
     user: UserResponse
     app: AppResponse
-    
+
     model_config = ConfigDict(from_attributes=True)
 
 
@@ -139,14 +142,14 @@ class DeploymentTeamMember(BaseModel):
     userId: UUID
     email: str
     username: str
-    
+
     model_config = ConfigDict(from_attributes=True)
 
 class DeploymentTeamResponse(BaseModel):
     teamId: UUID
     name: str
-    members: List[DeploymentTeamMember] = []
-    
+    members: list[DeploymentTeamMember] = []
+
     model_config = ConfigDict(from_attributes=True)
 
 
@@ -155,29 +158,29 @@ class TaskSummary(BaseModel):
     taskId: UUID
     type: TaskType
     status: TaskStatus
-    started_at: Optional[datetime] = None
-    finished_at: Optional[datetime] = None
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
     created_at: datetime
-    
+
     model_config = ConfigDict(from_attributes=True)
 
 
 # Terraform outputs parsed
 class DeploymentOutputs(BaseModel):
     """Parsed Terraform outputs - structure depends on app"""
-    raw: Optional[Dict[str, Any]] = None  # Full outputs as dict
-    
+    raw: dict[str, Any] | None = None  # Full outputs as dict
+
     model_config = ConfigDict(from_attributes=True)
 
 
 # Full deployment detail response
 class DeploymentDetail(DeploymentWithRelations):
     """Full deployment details with teams, task info, and outputs"""
-    teams: List[DeploymentTeamResponse] = []
-    latest_task: Optional[TaskSummary] = None
-    outputs: Optional[DeploymentOutputs] = None
-    logs: Optional[str] = None  # Optional: can be excluded for large logs
-    
+    teams: list[DeploymentTeamResponse] = []
+    latest_task: TaskSummary | None = None
+    outputs: DeploymentOutputs | None = None
+    logs: str | None = None  # Optional: can be excluded for large logs
+
     model_config = ConfigDict(from_attributes=True)
 
 # ----------------------------------------------------------------
@@ -188,22 +191,22 @@ class TaskBase(BaseModel):
     celeryTaskId: str
     type: TaskType
     status: TaskStatus
-    started_at: Optional[datetime] = None
-    finished_at: Optional[datetime] = None
-    logs: Optional[str] = None
-    tf_state: Optional[str] = None
-    outputs: Optional[str] = None
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
+    logs: str | None = None
+    tf_state: str | None = None
+    outputs: str | None = None
 
 class TaskCreate(TaskBase):
     pass
 
 class TaskUpdate(BaseModel):
-    status: Optional[TaskStatus] = None
-    started_at: Optional[datetime] = None
-    finished_at: Optional[datetime] = None
-    logs: Optional[str] = None
-    tf_state: Optional[str] = None
-    outputs: Optional[str] = None
+    status: TaskStatus | None = None
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
+    logs: str | None = None
+    tf_state: str | None = None
+    outputs: str | None = None
 
 class TaskResponse(TaskBase):
     taskId: UUID
@@ -218,18 +221,18 @@ class UserGroupBase(BaseModel):
     deploymentId: UUID
 
 class UserGroupCreate(UserGroupBase):
-    userIds: List[UUID] = []
-    courseIds: List[UUID] = []
+    userIds: list[UUID] = []
+    courseIds: list[UUID] = []
 
 class UserGroupResponse(UserGroupBase):
     userGroupId: UUID
-    
+
     model_config = ConfigDict(from_attributes=True)
 
 class UserGroupWithMembers(UserGroupResponse):
-    users: List[UserResponse] = []
-    courses: List[CourseResponse] = []
-    
+    users: list[UserResponse] = []
+    courses: list[CourseResponse] = []
+
     model_config = ConfigDict(from_attributes=True)
 
 # ----------------------------------------------------------------
@@ -240,19 +243,19 @@ class TeamBase(BaseModel):
     userGroupId: UUID
 
 class TeamCreate(TeamBase):
-    userIds: List[UUID] = []
+    userIds: list[UUID] = []
 
 class TeamUpdate(BaseModel):
-    name: Optional[str] = None
+    name: str | None = None
 
 class TeamResponse(TeamBase):
     teamId: UUID
-    
+
     model_config = ConfigDict(from_attributes=True)
 
 class TeamWithMembers(TeamResponse):
-    users: List[UserResponse] = []
-    
+    users: list[UserResponse] = []
+
     model_config = ConfigDict(from_attributes=True)
 
 # ----------------------------------------------------------------

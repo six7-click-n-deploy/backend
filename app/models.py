@@ -1,10 +1,13 @@
-from sqlalchemy import Column, String, DateTime, ForeignKey, Text, Enum, LargeBinary
-from sqlalchemy.dialects.postgresql import UUID
-from sqlalchemy.orm import relationship
-from datetime import datetime
-from app.database import Base
 import enum
 import uuid
+from datetime import datetime
+
+from sqlalchemy import Column, DateTime, Enum, ForeignKey, LargeBinary, String, Text
+from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.orm import relationship
+
+from app.database import Base
+
 
 # ----------------------------------------------------------------
 # ENUMS
@@ -33,10 +36,10 @@ class TaskStatus(str, enum.Enum):
 # ----------------------------------------------------------------
 class Course(Base):
     __tablename__ = "courses"
-    
+
     courseId = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     name = Column(String, nullable=False)
-    
+
     # Relationships
     users = relationship("User", back_populates="course")
 
@@ -45,7 +48,7 @@ class Course(Base):
 # ----------------------------------------------------------------
 class User(Base):
     __tablename__ = "users"
-    
+
     userId = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     keycloak_id = Column(String, unique=True, index=True, nullable=True)  # Keycloak User ID (sub)
     email = Column(String, unique=True, index=True, nullable=False)
@@ -55,7 +58,7 @@ class User(Base):
     role = Column(Enum(UserRole), nullable=False, default=UserRole.STUDENT)
     courseId = Column(UUID(as_uuid=True), ForeignKey("courses.courseId"), nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
-    
+
     # Relationships
     course = relationship("Course", back_populates="users")
     apps = relationship("App", back_populates="user")
@@ -68,7 +71,7 @@ class User(Base):
 # ----------------------------------------------------------------
 class App(Base):
     __tablename__ = "apps"
-    
+
     appId = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     name = Column(String, nullable=False)
     description = Column(String, nullable=True)
@@ -76,7 +79,7 @@ class App(Base):
     git_link = Column(String, nullable=True)
     userId = Column(UUID(as_uuid=True), ForeignKey("users.userId"), nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow)
-    
+
     # Relationships
     user = relationship("User", back_populates="apps")
     deployments = relationship("Deployment", back_populates="app")
@@ -86,14 +89,14 @@ class App(Base):
 # ----------------------------------------------------------------
 class Deployment(Base):
     __tablename__ = "deployments"
-    
+
     deploymentId = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     name = Column(String, nullable=False)
     releaseTag = Column(String, nullable=True)
     userInputVar = Column(Text, nullable=True)  # könnte auch JSON sein
     userId = Column(UUID(as_uuid=True), ForeignKey("users.userId"), nullable=False)
     appId = Column(UUID(as_uuid=True), ForeignKey("apps.appId"), nullable=False)
-    
+
     # Relationships
     user = relationship("User", back_populates="deployments")
     app = relationship("App", back_populates="deployments")
@@ -120,17 +123,17 @@ class Task(Base):
 
     # Relationships
     deployment = relationship("Deployment", backref="tasks")
-    
+
 # ----------------------------------------------------------------
 # USERTODEPLOYMENT MODEL
 # ----------------------------------------------------------------
 class UserToDeployment(Base):
     __tablename__ = "user_to_deployments"
-    
+
     userToDeploymentId = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     userId = Column(UUID(as_uuid=True), ForeignKey("users.userId"), nullable=False)
     deploymentId = Column(UUID(as_uuid=True), ForeignKey("deployments.deploymentId"), nullable=False)
-    
+
     # Relationships
     user = relationship("User", back_populates="user_to_deployments")
     deployment = relationship("Deployment", back_populates="user_to_deployments")
@@ -140,11 +143,11 @@ class UserToDeployment(Base):
 # ----------------------------------------------------------------
 class Team(Base):
     __tablename__ = "teams"
-    
+
     teamId = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     name = Column(String, nullable=False)
     deploymentId = Column(UUID(as_uuid=True), ForeignKey("deployments.deploymentId"), nullable=False)
-    
+
     # Relationships
     deployment = relationship("Deployment", back_populates="teams")
     user_to_teams = relationship("UserToTeam", back_populates="team")
@@ -154,11 +157,11 @@ class Team(Base):
 # ----------------------------------------------------------------
 class UserToTeam(Base):
     __tablename__ = "user_to_teams"
-    
+
     userToTeamId = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     userId = Column(UUID(as_uuid=True), ForeignKey("users.userId"), nullable=False)
     teamId = Column(UUID(as_uuid=True), ForeignKey("teams.teamId"), nullable=False)
-    
+
     # Relationships
     user = relationship("User", back_populates="user_to_teams")
     team = relationship("Team", back_populates="user_to_teams")

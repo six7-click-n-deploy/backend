@@ -1,9 +1,10 @@
 """
 Permission and authorization utilities for role-based access control
 """
+from collections.abc import Callable
 from functools import wraps
-from fastapi import HTTPException, status, Depends
-from typing import List, Callable
+
+from fastapi import Depends, HTTPException, status
 
 from app.models import User, UserRole
 from app.utils.keycloak_auth import get_current_user_keycloak as get_current_user
@@ -17,10 +18,10 @@ def get_current_active_user(current_user: User = Depends(get_current_user)) -> U
     return current_user
 
 
-def require_role(allowed_roles: List[UserRole]) -> Callable:
+def require_role(allowed_roles: list[UserRole]) -> Callable:
     """
     Decorator to require specific roles for an endpoint
-    
+
     Usage:
         @router.get("/admin-only")
         @require_role([UserRole.ADMIN])
@@ -36,13 +37,13 @@ def require_role(allowed_roles: List[UserRole]) -> Callable:
                     status_code=status.HTTP_401_UNAUTHORIZED,
                     detail="Not authenticated"
                 )
-            
+
             if current_user.role not in allowed_roles:
                 raise HTTPException(
                     status_code=status.HTTP_403_FORBIDDEN,
                     detail=f"Access forbidden. Required role: {[r.value for r in allowed_roles]}"
                 )
-            
+
             return await func(*args, **kwargs)
         return wrapper
     return decorator

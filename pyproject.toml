@@ -80,6 +80,7 @@ exclude = [
     "dist",
     "node_modules",
     "venv",
+    "alembic",
 ]
 
 [tool.ruff.lint]
@@ -87,7 +88,7 @@ select = [
     "E", "W", "F", "I", "B", "C4", "UP", "ARG", "SIM"
 ]
 ignore = [
-    "E501", "B008", "ARG001", "ARG002"
+    "E501", "B008", "ARG001", "ARG002", "E402", "UP042"
 ]
 fixable = ["ALL"]
 unfixable = []

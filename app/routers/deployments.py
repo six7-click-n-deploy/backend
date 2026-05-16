@@ -1,25 +1,25 @@
+import json
+from uuid import UUID
+
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
-from typing import List, Optional
-from uuid import UUID
-import json
 
+from app.crud import deployments as crud_deployments
+from app.crud import teams as crud_teams
 from app.database import get_db
 from app.models import TaskType, User
 from app.schemas import (
-    DeploymentCreate, 
-    DeploymentResponse, 
-    DeploymentWithRelations,
+    DeploymentCreate,
     DeploymentDetail,
-    DeploymentTeamResponse,
-    DeploymentTeamMember,
-    TaskSummary,
     DeploymentOutputs,
+    DeploymentResponse,
+    DeploymentTeamMember,
+    DeploymentTeamResponse,
+    TaskSummary,
 )
+from app.services.task_service import task_service
 from app.utils.keycloak_auth import get_current_user_keycloak
 from app.utils.permissions import ensure_resource_access
-from app.crud import deployments as crud_deployments, teams as crud_teams
-from app.services.task_service import task_service
 
 router = APIRouter()
 
@@ -27,13 +27,13 @@ router = APIRouter()
 # ----------------------------------------------------------------
 # GET ALL DEPLOYMENTS
 # ----------------------------------------------------------------
-@router.get("/", response_model=List[DeploymentResponse])
+@router.get("/", response_model=list[DeploymentResponse])
 def list_deployments(
     skip: int = 0,
     limit: int = 100,
-    user_id: Optional[UUID] = None,
-    app_id: Optional[UUID] = None,
-    status_filter: Optional[str] = None,
+    user_id: UUID | None = None,
+    app_id: UUID | None = None,
+    status_filter: str | None = None,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user_keycloak)
 ):
@@ -50,7 +50,7 @@ def list_deployments(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="You can only view your own deployments"
         )
-    
+
     deployments = crud_deployments.get_deployments(
         db,
         skip=skip,
@@ -59,7 +59,7 @@ def list_deployments(
         app_id=app_id,
         status=status_filter
     )
-    
+
     # Enrich with status and created_at from tasks
     result = []
     for deployment in deployments:
@@ -72,7 +72,7 @@ def list_deployments(
                 user_input_var_parsed = json.loads(deployment.userInputVar)
             except json.JSONDecodeError:
                 user_input_var_parsed = None
-        
+
         result.append(DeploymentResponse(
             deploymentId=deployment.deploymentId,
             name=deployment.name,
@@ -83,7 +83,7 @@ def list_deployments(
             status=status_value,
             created_at=created_at,
         ))
-    
+
     return result
 
 
@@ -111,15 +111,15 @@ def get_deployment(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Deployment not found"
         )
-    
+
     # Check access permission
     ensure_resource_access(deployment.userId, current_user)
-    
+
     # Get latest task
     latest_task = crud_deployments.get_latest_task(db, deployment_id)
     task_summary = None
     logs = None
-    
+
     if latest_task:
         task_summary = TaskSummary(
             taskId=latest_task.taskId,
@@ -131,7 +131,7 @@ def get_deployment(
         )
         if include_logs:
             logs = latest_task.logs
-    
+
     # Get teams with members
     teams_data = crud_deployments.get_deployment_teams_with_members(db, deployment_id)
     teams = [
@@ -149,15 +149,15 @@ def get_deployment(
         )
         for team in teams_data
     ]
-    
+
     # Get outputs
     outputs_data = crud_deployments.get_deployment_outputs(db, deployment_id)
     outputs = DeploymentOutputs(raw=outputs_data) if outputs_data else None
-    
+
     # Get status and created_at from tasks
     status_value = crud_deployments.get_deployment_status(db, deployment_id)
     created_at = crud_deployments.get_deployment_created_at(db, deployment_id)
-    
+
     # Parse userInputVar JSON string back to dict if it exists
     user_input_var_parsed = None
     if deployment.userInputVar:
@@ -165,7 +165,7 @@ def get_deployment(
             user_input_var_parsed = json.loads(deployment.userInputVar)
         except json.JSONDecodeError:
             user_input_var_parsed = None
-    
+
     return DeploymentDetail(
         deploymentId=deployment.deploymentId,
         name=deployment.name,
@@ -202,7 +202,7 @@ def create_deployment(
 
     # Create teams and collect all user IDs
     user_ids_in_deployment = set()
-    
+
     if deployment.teams:
         # Teams data should already have correct userIds from frontend
         teams_data = [
@@ -214,11 +214,11 @@ def create_deployment(
             deployment_id=db_deployment.deploymentId,
             teams_data=teams_data
         )
-        
+
         # Collect all user IDs from teams
         for team in deployment.teams:
             user_ids_in_deployment.update(team.userIds)
-    
+
     # Create UserToDeployment entries
     if user_ids_in_deployment:
         crud_deployments.create_user_to_deployments(
@@ -226,19 +226,19 @@ def create_deployment(
             deployment_id=db_deployment.deploymentId,
             user_ids=user_ids_in_deployment
         )
-    
+
     db.commit()
     db.refresh(db_deployment)
-    
+
     try:
         """
         Parse user input variables
         structure: {
-            packer : { 
+            packer : {
                 "variable_name": "value",
                 ...
             },
-            terraform: { 
+            terraform: {
                 "variable_name": "value",
                 ...
             }
@@ -248,7 +248,7 @@ def create_deployment(
         user_vars = json.loads(db_deployment.userInputVar) if db_deployment.userInputVar else {}
     except Exception:
         user_vars = {}
-    
+
     # Format teams for Terraform (team_name: [user_emails])
     teams_dict = {}
     if deployment.teams:
@@ -260,7 +260,7 @@ def create_deployment(
                 user = crud_users.get_user(db, user_id)
                 if user:
                     team_users.append({"email": user.email})
-            
+
             teams_dict[team.name] = team_users
 
     # Start deployment task
@@ -322,10 +322,10 @@ def delete_deployment(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Deployment not found"
         )
-    
+
     # Check access permission
     ensure_resource_access(deployment.userId, current_user)
-    
+
     success = crud_deployments.delete_deployment(db, deployment_id)
     if not success:
         raise HTTPException(

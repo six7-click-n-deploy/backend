@@ -1,14 +1,14 @@
-from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy.orm import Session
-from typing import List
 from uuid import UUID
 
+from fastapi import APIRouter, Depends, HTTPException, status
+from sqlalchemy.orm import Session
+
+from app.crud import courses as crud_courses
 from app.database import get_db
 from app.models import User
-from app.schemas import CourseCreate, CourseUpdate, CourseResponse, CourseWithUsers
+from app.schemas import CourseCreate, CourseResponse, CourseUpdate, CourseWithUsers
 from app.utils.keycloak_auth import get_current_user_keycloak
 from app.utils.permissions import get_current_teacher_or_admin
-from app.crud import courses as crud_courses
 
 router = APIRouter()
 
@@ -16,7 +16,7 @@ router = APIRouter()
 # ----------------------------------------------------------------
 # GET ALL COURSES
 # ----------------------------------------------------------------
-@router.get("/", response_model=List[CourseResponse])
+@router.get("/", response_model=list[CourseResponse])
 def list_courses(
     skip: int = 0,
     limit: int = 100,

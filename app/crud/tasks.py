@@ -1,10 +1,12 @@
-from sqlalchemy.orm import Session
-from typing import List, Optional
 from uuid import UUID
-from app.models import Task, TaskType, TaskStatus
-from app.schemas import TaskCreate, TaskUpdate
 
-def get_task(db: Session, task_id: UUID) -> Optional[Task]:
+from sqlalchemy.orm import Session
+
+from app.models import Task, TaskStatus
+from app.schemas import TaskCreate
+
+
+def get_task(db: Session, task_id: UUID) -> Task | None:
     """Get task by ID"""
     return db.query(Task).filter(Task.taskId == task_id).first()
 
@@ -13,10 +15,10 @@ def get_tasks(
     db: Session,
     skip: int = 0,
     limit: int = 100,
-    deployment_id: Optional[UUID] = None,
-    celery_task_id: Optional[str] = None,
-    status: Optional[TaskStatus] = None
-) -> List[Task]:
+    deployment_id: UUID | None = None,
+    celery_task_id: str | None = None,
+    status: TaskStatus | None = None
+) -> list[Task]:
     """Get tasks with optional filters"""
     query = db.query(Task)
     if deployment_id:
@@ -37,18 +39,18 @@ def create_task(db: Session, task: TaskCreate) -> Task:
     return db_task
 
 
-def update_task(db: Session, task_id: UUID, task_update) -> Optional[Task]:
+def update_task(db: Session, task_id: UUID, task_update) -> Task | None:
     """Update task information"""
     db_task = get_task(db, task_id)
     if not db_task:
         return None
-    
+
     # Handle both dict and Pydantic model
     if isinstance(task_update, dict):
         update_data = task_update
     else:
         update_data = task_update.model_dump(exclude_unset=True)
-    
+
     for field, value in update_data.items():
         setattr(db_task, field, value)
     db.commit()

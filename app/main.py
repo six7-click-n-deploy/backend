@@ -1,12 +1,12 @@
-from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
-from contextlib import asynccontextmanager
 import logging
 import threading
+from contextlib import asynccontextmanager
 
-from app.database import engine, Base
-from app.routers import auth_keycloak, users, courses, apps, deployments, teams, tasks, quotas
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+
 from app.config import settings
+from app.routers import apps, auth_keycloak, courses, deployments, quotas, tasks, teams, users
 from app.services.celery_event_listener import start_event_listener
 
 logger = logging.getLogger(__name__)
@@ -19,16 +19,16 @@ async def lifespan(app: FastAPI):
     # Startup
     logger.info("=== Application Starting ===")
     logger.info("ℹ️  Use 'alembic upgrade head' to apply database migrations")
-    
+
     # Start Celery event listener in background thread
     listener_thread = threading.Thread(target=start_event_listener, daemon=True)
     listener_thread.start()
     logger.info("✓ Celery event listener started in background")
-    
+
     logger.info("✓ Application started")
-    
+
     yield
-    
+
     # Shutdown
     logger.info("=== Application Shutting Down ===")
     logger.info("✓ Shutdown complete")

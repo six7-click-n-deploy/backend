@@ -1,6 +1,9 @@
 # ----------------------------------------------------------------
 from sqlalchemy.orm import Session
+
 from app.models import User, UserRole
+
+
 # ZENTRALE USER-SYNC-FUNKTION
 # ----------------------------------------------------------------
 def sync_user_from_keycloak(db: Session, keycloak_user_data: dict) -> User:
@@ -9,7 +12,7 @@ def sync_user_from_keycloak(db: Session, keycloak_user_data: dict) -> User:
     Legt an, falls nicht vorhanden, oder updated Rolle und Namen, falls nötig.
     Erwartet keycloak_user_data mit Feldern: id, username, email, roles (Liste), firstName, lastName
     """
-    from app.models import User, UserRole
+    from app.models import User
     # Keycloak User ID
     keycloak_id = keycloak_user_data.get("id") or keycloak_user_data.get("sub")
     email = keycloak_user_data.get("email") or f"{keycloak_user_data.get('username')}@dhbw.de"
@@ -53,16 +56,15 @@ def sync_user_from_keycloak(db: Session, keycloak_user_data: dict) -> User:
 Keycloak Authentication & Authorization
 Handles token validation and user management with Keycloak
 """
-from typing import Optional
 from fastapi import Depends, HTTPException, status
-from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from jose import JWTError, jwt
+from keycloak import KeycloakAdmin, KeycloakAuthenticationError, KeycloakOpenID
 from sqlalchemy.orm import Session
-from keycloak import KeycloakOpenID, KeycloakAdmin, KeycloakAuthenticationError
-from jose import jwt, JWTError
 
 from app.config import settings
 from app.database import get_db
-from app.models import User, UserRole
+from app.models import User
 
 # ----------------------------------------------------------------
 # SECURITY
@@ -98,96 +100,96 @@ def get_keycloak_admin() -> KeycloakAdmin:
 def verify_keycloak_token(token: str) -> dict:
     """
     Verify and decode Keycloak JWT token
-    
+
     Args:
         token: JWT access token from Keycloak
-        
+
     Returns:
         Decoded token payload with user info
-        
+
     Raises:
         HTTPException: If token is invalid or expired
     """
     try:
         keycloak_client = get_keycloak_client()
-        
+
         # Option 1: Introspect (validates against Keycloak server - slower but accurate)
         token_info = keycloak_client.introspect(token)
-        
+
         if not token_info.get('active'):
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Token is not active or has expired",
                 headers={"WWW-Authenticate": "Bearer"},
             )
-        
+
         return token_info
-        
+
     except KeycloakAuthenticationError as e:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail=f"Authentication failed: {str(e)}",
             headers={"WWW-Authenticate": "Bearer"},
-        )
+        ) from e
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail=f"Could not validate credentials: {str(e)}",
             headers={"WWW-Authenticate": "Bearer"},
-        )
+        ) from e
 
 def verify_keycloak_token_offline(token: str) -> dict:
     """
     Verify JWT token offline using public key (faster, but less secure)
     Use this for performance, but introspect for critical operations
-    
+
     Args:
         token: JWT access token from Keycloak
-        
+
     Returns:
         Decoded token payload
-        
+
     Raises:
         HTTPException: If token is invalid
     """
     try:
         keycloak_client = get_keycloak_client()
-        
+
         # Get public key from Keycloak (cached internally)
         public_key = (
             "-----BEGIN PUBLIC KEY-----\n"
             + keycloak_client.public_key()
             + "\n-----END PUBLIC KEY-----"
         )
-        
+
         # Decode and verify token
         options = {
             "verify_signature": True,
             "verify_aud": False,  # Audience verification (optional)
             "verify_exp": True,   # Expiration verification
         }
-        
+
         decoded = jwt.decode(
             token,
             public_key,
             algorithms=["RS256"],
             options=options,
         )
-        
+
         return decoded
-        
+
     except JWTError as e:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail=f"Invalid token: {str(e)}",
             headers={"WWW-Authenticate": "Bearer"},
-        )
+        ) from e
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail=f"Token validation failed: {str(e)}",
             headers={"WWW-Authenticate": "Bearer"},
-        )
+        ) from e
 
 # ----------------------------------------------------------------
 # ROLE MAPPING
@@ -195,7 +197,7 @@ def verify_keycloak_token_offline(token: str) -> dict:
 def map_keycloak_roles_to_app_role(keycloak_roles: list) -> UserRole:
     """
     Map Keycloak realm roles to app's UserRole enum
-    
+
     Priority: admin > teacher > student
     """
     if "admin" in keycloak_roles:
@@ -214,18 +216,18 @@ def get_current_user_keycloak(
 ) -> User:
     """
     Get current authenticated user from Keycloak token
-    
+
     - Validates token against Keycloak
     - Retrieves or creates user in local DB (Just-in-Time Provisioning)
     - Maps Keycloak roles to app roles
-    
+
     This is the main dependency for protected routes.
     """
     token = credentials.credentials
-    
+
     # Validate token (use offline for performance, introspect for critical ops)
     token_info = verify_keycloak_token_offline(token)
-    
+
     # Extract user info from token
     keycloak_id = token_info.get("sub")  # Keycloak User ID
     email = token_info.get("email")
@@ -263,20 +265,18 @@ def get_current_user_hybrid(
     Hybrid authentication: Try Keycloak first, fallback to legacy JWT
     Use this during migration period to support both auth methods
     """
-    token = credentials.credentials
-    
     keycloak_error = None
     legacy_error = None
-    
+
     # Try Keycloak first
     if settings.KEYCLOAK_ENABLED:
         try:
             return get_current_user_keycloak(credentials, db)
         except HTTPException as e:
             keycloak_error = e.detail
-    
+
     # Fallback to legacy JWT auth (import from old auth.py)
-    from app.utils.auth import verify_token, get_current_user
+    from app.utils.auth import verify_token
     try:
         username = verify_token(credentials)
         user = db.query(User).filter(User.username == username).first()
@@ -285,14 +285,14 @@ def get_current_user_hybrid(
         legacy_error = "User not found in database"
     except Exception as e:
         legacy_error = str(e)
-    
+
     # Both methods failed - provide detailed error
     error_details = []
     if keycloak_error:
         error_details.append(f"Keycloak: {keycloak_error}")
     if legacy_error:
         error_details.append(f"Legacy: {legacy_error}")
-    
+
     raise HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
         detail=f"Authentication failed. {' | '.join(error_details)}",
@@ -306,26 +306,26 @@ def search_keycloak_users(search_query: str, max_results: int = 10) -> list[dict
     """
     Search users in Keycloak by username or email
     Uses service account client (OAuth2 client_credentials grant)
-    
+
     Args:
         search_query: Search string (matches username, email, first/last name)
         max_results: Maximum number of results to return
-        
+
     Returns:
         List of user dicts with: id, username, email, firstName, lastName
-        
+
     Raises:
         HTTPException: If Keycloak query fails
     """
     try:
         keycloak_admin = get_keycloak_admin()
-        
+
         # Search users in Keycloak
         users = keycloak_admin.get_users({
             "search": search_query,
             "max": max_results
         })
-        
+
         # Return simplified user info
         return [{
             "id": user.get("id"),
@@ -335,12 +335,12 @@ def search_keycloak_users(search_query: str, max_results: int = 10) -> list[dict
             "lastName": user.get("lastName", ""),
             "enabled": user.get("enabled", True)
         } for user in users]
-        
+
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to search Keycloak users: {str(e)}"
-        )
+        ) from e
 
 
 def get_keycloak_users_by_ids(ids: list[str]) -> dict:
@@ -374,4 +374,4 @@ def get_keycloak_users_by_ids(ids: list[str]) -> dict:
             }
         return result
     except Exception as e:
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Failed to fetch Keycloak users: {str(e)}")
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Failed to fetch Keycloak users: {str(e)}") from e
