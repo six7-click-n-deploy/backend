@@ -27,6 +27,7 @@ class TaskStatus(str, enum.Enum):
     SUCCESS = "success"
     FAILED = "failed"
     CANCELLED = "cancelled"
+    DESTROYED = "destroyed"
 
 # ----------------------------------------------------------------
 # COURSE MODEL

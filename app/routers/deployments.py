@@ -231,39 +231,22 @@ def create_deployment(
     db.refresh(db_deployment)
     
     try:
-        """
-        Parse user input variables
-        structure: {
-            packer : { 
-                "variable_name": "value",
-                ...
-            },
-            terraform: { 
-                "variable_name": "value",
-                ...
-            }
-        }
-        """
-        # TODO: Verify and validate user input variables against structure definition
         user_vars = json.loads(db_deployment.userInputVar) if db_deployment.userInputVar else {}
     except Exception:
         user_vars = {}
-    
-    # Format teams for Terraform (team_name: [user_emails])
+
+    # Build teams dict: team_name → [{"email": ...}]
     teams_dict = {}
     if deployment.teams:
         for team in deployment.teams:
-            # Get user emails from user IDs
             from app.crud import users as crud_users
             team_users = []
             for user_id in team.userIds:
                 user = crud_users.get_user(db, user_id)
                 if user:
                     team_users.append({"email": user.email})
-            
             teams_dict[team.name] = team_users
 
-    # Start deployment task
     task, celery_task_id = task_service.register_new_task(
         db=db,
         deployment_id=db_deployment.deploymentId,
@@ -275,7 +258,7 @@ def create_deployment(
             db_deployment.app.git_link,
             db_deployment.releaseTag,
             user_vars,
-            teams_dict  # Teams mit User-Emails
+            teams_dict,
         ],
     )
 
@@ -304,6 +287,62 @@ def create_deployment(
 
 
 # ----------------------------------------------------------------
+# CANCEL / STOP DEPLOYMENT
+# ----------------------------------------------------------------
+@router.post("/{deployment_id}/cancel", status_code=status.HTTP_200_OK)
+def cancel_deployment(
+    deployment_id: UUID,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user_keycloak)
+):
+    """
+    Cancel a pending deployment or stop a running one.
+    - PENDING: revokes the task from the queue before it starts
+    - RUNNING: sends SIGTERM to the worker, killing the active Terraform process
+    """
+    deployment = crud_deployments.get_deployment(db, deployment_id)
+    if not deployment:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Deployment not found")
+
+    ensure_resource_access(deployment.userId, current_user)
+
+    try:
+        task_service.cancel_task(db, deployment_id)
+    except Exception as e:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(e))
+
+    return {"detail": "Deployment cancelled"}
+
+
+# ----------------------------------------------------------------
+# DESTROY DEPLOYMENT RESOURCES (Terraform Destroy)
+# ----------------------------------------------------------------
+@router.post("/{deployment_id}/destroy", status_code=status.HTTP_202_ACCEPTED)
+def destroy_deployment(
+    deployment_id: UUID,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user_keycloak)
+):
+    """
+    Trigger Terraform destroy for a successfully deployed deployment.
+    - Only allowed when status is SUCCESS
+    - Starts a destroy Celery task in the background
+    """
+    deployment = crud_deployments.get_deployment(db, deployment_id)
+    if not deployment:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Deployment not found")
+
+    ensure_resource_access(deployment.userId, current_user)
+
+    try:
+        task, celery_task_id = task_service.destroy_task(db, deployment_id)
+    except Exception as e:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(e))
+
+    return {"detail": "Destroy started", "task_id": str(task.taskId)}
+
+
+# ----------------------------------------------------------------
 # DELETE DEPLOYMENT
 # ----------------------------------------------------------------
 @router.delete("/{deployment_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -322,10 +361,19 @@ def delete_deployment(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Deployment not found"
         )
-    
+
     # Check access permission
     ensure_resource_access(deployment.userId, current_user)
-    
+
+    # Block delete if resources are still live or a destroy is in progress
+    current_status = crud_deployments.get_deployment_status(db, deployment_id)
+    if current_status in ("success", "running", "pending", "destroying"):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Cannot delete deployment with status '{current_status}'. "
+                   "Cancel or destroy resources first."
+        )
+
     success = crud_deployments.delete_deployment(db, deployment_id)
     if not success:
         raise HTTPException(

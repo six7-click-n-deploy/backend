@@ -7,7 +7,9 @@ FROM python:3.11-slim
 # Set environment variables
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONPATH=/app
+    PYTHONPATH=/app \
+    POETRY_VIRTUALENVS_PATH=/venv \
+    POETRY_VIRTUALENVS_IN_PROJECT=false
 
 WORKDIR /app
 

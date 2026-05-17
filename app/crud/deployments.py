@@ -1,12 +1,11 @@
 from sqlalchemy.orm import Session, joinedload
-from sqlalchemy import desc
+from sqlalchemy import desc, asc
 from typing import List, Optional, Set, Dict, Any
 from uuid import UUID
 import json
 
 from app.models import Deployment, UserToDeployment, Task, Team, User
 from app.schemas import DeploymentCreate
-
 
 def get_deployment(db: Session, deployment_id: UUID) -> Optional[Deployment]:
     """Get deployment by ID"""
@@ -39,7 +38,6 @@ def get_latest_task(db: Session, deployment_id: UUID) -> Optional[Task]:
 
 def get_first_task(db: Session, deployment_id: UUID) -> Optional[Task]:
     """Get the first task for a deployment (when deployment was created)"""
-    from sqlalchemy import asc
     return (
         db.query(Task)
         .filter(Task.deploymentId == deployment_id)
@@ -49,11 +47,23 @@ def get_first_task(db: Session, deployment_id: UUID) -> Optional[Task]:
 
 
 def get_deployment_status(db: Session, deployment_id: UUID) -> Optional[str]:
-    """Get current status from the latest task"""
+    """Get current display status from the latest task, combining type + status."""
     task = get_latest_task(db, deployment_id)
-    if task:
-        return task.status.value if task.status else None
-    return None
+    if not task or not task.status:
+        return None
+
+    from app.models import TaskType, TaskStatus
+
+    # Terminal states are always shown as-is regardless of task type
+    terminal = {TaskStatus.SUCCESS, TaskStatus.FAILED, TaskStatus.CANCELLED, TaskStatus.DESTROYED}
+    if task.status in terminal:
+        return task.status.value
+
+    # For active destroy tasks, show "destroying" instead of "pending"/"running"
+    if task.type == TaskType.DESTROY:
+        return "destroying"
+
+    return task.status.value
 
 
 def get_deployment_created_at(db: Session, deployment_id: UUID):
@@ -184,11 +194,28 @@ def create_deployment(db: Session, deployment: DeploymentCreate, user_id: UUID) 
     return db_deployment
 
 def delete_deployment(db: Session, deployment_id: UUID) -> bool:
-    """Delete a deployment"""
+    """Delete a deployment and all related records (tasks, teams, user-mappings)"""
     db_deployment = get_deployment(db, deployment_id)
     if not db_deployment:
         return False
-    
+
+    from app.models import UserToTeam, Team, UserToDeployment, Task
+
+    # 1. Delete tasks
+    tasks = db.query(Task).filter(Task.deploymentId == deployment_id).all()
+    for task in tasks:
+        db.delete(task)
+
+    # 2. Delete team members, then teams
+    teams = db.query(Team).filter(Team.deploymentId == deployment_id).all()
+    for team in teams:
+        db.query(UserToTeam).filter(UserToTeam.teamId == team.teamId).delete()
+        db.delete(team)
+
+    # 3. Delete user-deployment mappings
+    db.query(UserToDeployment).filter(UserToDeployment.deploymentId == deployment_id).delete()
+
+    db.flush()
     db.delete(db_deployment)
     db.commit()
     return True
