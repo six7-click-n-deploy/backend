@@ -107,7 +107,6 @@ jobs:
     name: "\U0001F433 Build & Push"
     runs-on: ubuntu-latest
     needs: [test]
-    if: github.event_name != 'pull_request'
     permissions:
       contents: read
       packages: write
@@ -145,7 +144,7 @@ jobs:
         with:
           context: .
           file: ./Dockerfile
-          push: true
+          push: ${{ github.event_name != 'pull_request' }}
           platforms: linux/amd64,linux/arm64
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
