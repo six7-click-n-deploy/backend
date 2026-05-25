@@ -111,6 +111,18 @@ def get_deployment_teams_with_members(db: Session, deployment_id: UUID) -> List[
     return result
 
 
+def get_latest_tf_state(db: Session, deployment_id: UUID) -> Optional[str]:
+    """Get the most recent non-null tf_state for a deployment"""
+    task = (
+        db.query(Task)
+        .filter(Task.deploymentId == deployment_id)
+        .filter(Task.tf_state.isnot(None))
+        .order_by(desc(Task.created_at))
+        .first()
+    )
+    return task.tf_state if task else None
+
+
 def get_deployment_outputs(db: Session, deployment_id: UUID) -> Optional[Dict[str, Any]]:
     """Get parsed Terraform outputs from the latest successful task"""
     task = (

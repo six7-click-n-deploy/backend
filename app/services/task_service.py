@@ -85,6 +85,8 @@ class TaskService:
             for team in teams_data
         }
 
+        tf_state = crud_deployments.get_latest_tf_state(db, deployment_id)
+
         task, celery_task_id = self.register_new_task(
             db=db,
             deployment_id=deployment_id,
@@ -97,6 +99,7 @@ class TaskService:
                 user_vars,
                 teams_dict,
                 str(deployment.appId),
+                tf_state,
             ],
         )
         return task, celery_task_id
