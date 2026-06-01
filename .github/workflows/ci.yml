@@ -16,7 +16,7 @@ jobs:
   # 🔍 LINT
   # ================================================================
   lint:
-    name: "\U0001F50D Lint"
+    name: "🔍 Lint"
     runs-on: ubuntu-latest
 
     steps:
@@ -41,12 +41,47 @@ jobs:
         run: poetry run ruff check .
 
   # ================================================================
-  # 🧪 TEST
+  # 🧪 TEST (unit) — no external dependencies
   # ================================================================
-  test:
-    name: "\U0001F9EA Test"
+  test-unit:
+    name: "🧪 Test (unit)"
     runs-on: ubuntu-latest
-    needs: [lint]
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install Poetry
+        run: |
+          curl -sSL https://install.python-poetry.org | python3 -
+          echo "$HOME/.local/bin" >> $GITHUB_PATH
+
+      - name: Install dependencies
+        run: poetry install --with dev --no-root
+
+      - name: Run unit tests
+        run: poetry run pytest -m unit -v
+        env:
+          DATABASE_URL: "postgresql://test:test@localhost:5432/test"
+          CREDENTIAL_ENCRYPTION_KEY: "dGVzdC1rZXktMzItYnl0ZXMtbG9uZy10ZXN0a2V5"
+          KEYCLOAK_SERVER_URL: "http://localhost:8080"
+          KEYCLOAK_REALM: "dhbw"
+          KEYCLOAK_CLIENT_ID: "appstore-backend"
+          KEYCLOAK_CLIENT_SECRET: "test-secret"
+          KEYCLOAK_ENABLED: "false"
+
+  # ================================================================
+  # 🧪 TEST (integration) — requires Postgres
+  # ================================================================
+  test-integration:
+    name: "🧪 Test (integration)"
+    runs-on: ubuntu-latest
 
     services:
       postgres:
@@ -81,11 +116,62 @@ jobs:
       - name: Install dependencies
         run: poetry install --with dev --no-root
 
-      - name: Run tests
-        run: poetry run pytest -v --cov=app --cov-report=xml --cov-report=term
+      - name: Run integration tests
+        run: poetry run pytest -m integration -v
         env:
           DATABASE_URL: "postgresql://test:test@localhost:5432/test"
-          SECRET_KEY: "test-secret-key"
+          CREDENTIAL_ENCRYPTION_KEY: "dGVzdC1rZXktMzItYnl0ZXMtbG9uZy10ZXN0a2V5"
+          KEYCLOAK_SERVER_URL: "http://localhost:8080"
+          KEYCLOAK_REALM: "dhbw"
+          KEYCLOAK_CLIENT_ID: "appstore-backend"
+          KEYCLOAK_CLIENT_SECRET: "test-secret"
+          KEYCLOAK_ENABLED: "false"
+
+  # ================================================================
+  # 🧪 TEST (api) — end-to-end against running API
+  # ================================================================
+  test-api:
+    name: "🧪 Test (api)"
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: test
+          POSTGRES_PASSWORD: test
+          POSTGRES_DB: test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install Poetry
+        run: |
+          curl -sSL https://install.python-poetry.org | python3 -
+          echo "$HOME/.local/bin" >> $GITHUB_PATH
+
+      - name: Install dependencies
+        run: poetry install --with dev --no-root
+
+      - name: Run API tests
+        run: poetry run pytest -m api -v --cov=app --cov-report=xml --cov-report=term
+        env:
+          DATABASE_URL: "postgresql://test:test@localhost:5432/test"
+          CREDENTIAL_ENCRYPTION_KEY: "dGVzdC1rZXktMzItYnl0ZXMtbG9uZy10ZXN0a2V5"
           KEYCLOAK_SERVER_URL: "http://localhost:8080"
           KEYCLOAK_REALM: "dhbw"
           KEYCLOAK_CLIENT_ID: "appstore-backend"
@@ -101,12 +187,57 @@ jobs:
           retention-days: 7
 
   # ================================================================
-  # 🐳 BUILD & PUSH
+  # 🐳 BUILD — always runs, proves Dockerfile works
   # ================================================================
-  build-and-push:
-    name: "\U0001F433 Build & Push"
+  build:
+    name: "🐳 Build"
     runs-on: ubuntu-latest
-    needs: [test]
+    needs: [lint, test-unit, test-integration, test-api]
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=sha,prefix=sha-
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+
+      - name: Build Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./Dockerfile
+          push: false
+          platforms: linux/amd64,linux/arm64
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # ================================================================
+  # 📦 PUSH — only on main
+  # ================================================================
+  push:
+    name: "📦 Push"
+    runs-on: ubuntu-latest
+    needs: [build]
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
     permissions:
       contents: read
       packages: write
@@ -144,7 +275,7 @@ jobs:
         with:
           context: .
           file: ./Dockerfile
-          push: ${{ github.event_name != 'pull_request' }}
+          push: true
           platforms: linux/amd64,linux/arm64
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
@@ -157,7 +288,7 @@ jobs:
   trigger-staging:
     name: "🚀 Trigger Staging Deploy"
     runs-on: ubuntu-latest
-    needs: [build-and-push]
+    needs: [push]
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
 
     steps:
