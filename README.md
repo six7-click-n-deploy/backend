@@ -142,6 +142,20 @@ GET    /tasks/{id}             # Task Status
 GET    /tasks/celery/{task_id} # Celery Task Status
 ```
 
+### OpenStack Credentials (per User)
+```
+GET    /me/openstack-credentials           # Maskierter Status (404 wenn keine)
+PUT    /me/openstack-credentials           # Credentials setzen / ersetzen (auto-validiert)
+PUT    /me/openstack-credentials/from-yaml # clouds.yaml hochladen
+POST   /me/openstack-credentials/test      # Erneut gegen Keystone validieren
+DELETE /me/openstack-credentials           # Entfernen
+```
+
+Credentials werden Fernet-verschlüsselt in Postgres abgelegt
+(`CREDENTIAL_ENCRYPTION_KEY` in der Backend-Env, identisch im Worker).
+Der Backend dispatch packt nur **Ciphertext** in die Celery-Nachricht; der
+Worker entschlüsselt erst beim Ausführen der Task.
+
 ### System
 ```
 GET    /health                 # Health Check

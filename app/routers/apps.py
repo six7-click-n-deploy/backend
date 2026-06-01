@@ -179,25 +179,18 @@ def _parse_packer_variables(file_path: str) -> List[Dict[str, Any]]:
 def list_apps(
     skip: int = 0,
     limit: int = 100,
-    user_id: Optional[UUID] = None,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user_keycloak)
 ):
     """
-    Get all apps with optional user filter
-    - **Students**: Can only see their own apps
-    - **Teachers/Admins**: Can see all apps
+    Get all apps owned by the current user.
+
+    Listing is always scoped to the requester regardless of role — teachers
+    and admins still only see their own apps in the index. Cross-user access
+    happens explicitly through `GET /apps/{app_id}`, which is gated by
+    `ensure_resource_access`.
     """
-    # Students can only see their own apps
-    if current_user.role.value == "student" and not user_id:
-        user_id = current_user.userId
-    elif current_user.role.value == "student" and user_id != current_user.userId:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="You can only view your own apps"
-        )
-    
-    apps = crud_apps.get_apps(db, skip=skip, limit=limit, user_id=user_id)
+    apps = crud_apps.get_apps(db, skip=skip, limit=limit, user_id=current_user.userId)
     return apps
 
 
@@ -299,11 +292,11 @@ def get_app_variables(
         
         return variables
     
-    except Exception as e:
-        logger.error(f"Failed to get variables for app {app_id} version {version}: {str(e)}")
+    except Exception:
+        logger.exception(f"Failed to get variables for app {app_id} version {version}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to fetch variables: {str(e)}"
+            detail="Failed to fetch variables",
         )
     finally:
         # Always cleanup cloned repository
