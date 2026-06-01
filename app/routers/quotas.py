@@ -88,13 +88,19 @@ def _get_openstack_conn_for_user(db: Session, user: User):
 
 
 @router.get("/overview", response_model=QuotaOverviewResponse)
-async def get_quota_overview(
+def get_quota_overview(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user_keycloak),
 ):
     """
     Holt OpenStack Quota-Übersicht für Compute, Storage und Network
     aus dem **persönlichen** OpenStack-Projekt des Users.
+
+    Declared sync (not async) on purpose: every call inside hits the
+    OpenStack SDK with blocking network I/O. A sync def runs in
+    Starlette's threadpool, so a slow OpenStack response doesn't stall
+    the event loop and starve other endpoints (e.g. /dashboard/stats,
+    /users/me) that are mounted on the same dashboard view.
 
     Returns:
         QuotaOverviewResponse mit used/limit/available für alle Ressourcen

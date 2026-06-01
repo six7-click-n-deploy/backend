@@ -2,6 +2,8 @@
 Keycloak Authentication & Authorization
 Handles token validation and user management with Keycloak.
 """
+import threading
+
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from jose import JWTError, jwt
@@ -41,6 +43,34 @@ def get_keycloak_admin() -> KeycloakAdmin:
 
 
 # ----------------------------------------------------------------
+# PUBLIC KEY CACHE
+# ----------------------------------------------------------------
+# python-keycloak's public_key() does a fresh HTTP GET to the realm
+# endpoint on every call. We hit it on every authenticated request,
+# which adds ~1s of latency to each call in a local Docker stack.
+# The realm signing key is stable for the process lifetime, so we
+# cache the PEM-formatted key after the first fetch. On rotation,
+# restart the process — the same trade-off the rest of the codebase
+# already accepts (settings, DB engine, etc.).
+_public_key_pem: str | None = None
+_public_key_lock = threading.Lock()
+
+
+def _get_realm_public_key_pem() -> str:
+    global _public_key_pem
+    if _public_key_pem is not None:
+        return _public_key_pem
+    with _public_key_lock:
+        if _public_key_pem is not None:
+            return _public_key_pem
+        raw = get_keycloak_client().public_key()
+        _public_key_pem = (
+            "-----BEGIN PUBLIC KEY-----\n" + raw + "\n-----END PUBLIC KEY-----"
+        )
+        return _public_key_pem
+
+
+# ----------------------------------------------------------------
 # TOKEN VALIDATION
 # ----------------------------------------------------------------
 def verify_keycloak_token(token: str) -> dict:
@@ -74,12 +104,7 @@ def verify_keycloak_token(token: str) -> dict:
 def verify_keycloak_token_offline(token: str) -> dict:
     """Validate JWT signature against Keycloak public key (fast, no server round-trip)."""
     try:
-        keycloak_client = get_keycloak_client()
-        public_key = (
-            "-----BEGIN PUBLIC KEY-----\n"
-            + keycloak_client.public_key()
-            + "\n-----END PUBLIC KEY-----"
-        )
+        public_key = _get_realm_public_key_pem()
         return jwt.decode(
             token,
             public_key,
