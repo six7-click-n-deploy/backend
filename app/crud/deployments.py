@@ -1,15 +1,43 @@
 import json
-from typing import Any
+from typing import Any, Optional
 from uuid import UUID
 
-from sqlalchemy import desc
+from sqlalchemy import desc, exists
 from sqlalchemy.orm import Session, joinedload
 
-from app.models import Deployment, Task, Team, User, UserToDeployment
+from app.models import Deployment, Task, TaskStatus, TaskType, Team, User, UserToDeployment
 from app.schemas import DeploymentCreate
 
 
-def get_deployment(db: Session, deployment_id: UUID) -> Deployment | None:
+def _is_destroyed_subq():
+    """Correlated EXISTS: deployment has a successful DESTROY task."""
+    return exists().where(
+        (Task.deploymentId == Deployment.deploymentId)
+        & (Task.type == TaskType.DESTROY)
+        & (Task.status == TaskStatus.SUCCESS)
+    )
+
+
+def count_active_user_deployments(db: Session, user_id: UUID) -> int:
+    """Number of non-destroyed deployments owned by user."""
+    return (
+        db.query(Deployment)
+        .filter(Deployment.userId == user_id)
+        .filter(~_is_destroyed_subq())
+        .count()
+    )
+
+
+def has_active_user_deployment(db: Session, user_id: UUID) -> bool:
+    return (
+        db.query(Deployment.deploymentId)
+        .filter(Deployment.userId == user_id)
+        .filter(~_is_destroyed_subq())
+        .first() is not None
+    )
+
+
+def get_deployment(db: Session, deployment_id: UUID) -> Optional[Deployment]:
     """Get deployment by ID"""
     return db.query(Deployment).filter(Deployment.deploymentId == deployment_id).first()
 
@@ -166,7 +194,13 @@ def get_deployments_with_status(db: Session, deployments: list[Deployment]) -> l
 
 
 def create_deployment(db: Session, deployment: DeploymentCreate, user_id: UUID) -> Deployment:
-    """Create a new deployment"""
+    """Insert a deployment row in the current transaction.
+
+    Does NOT commit — the caller is expected to also insert teams/tasks
+    in the same TX and commit once at the end. This is necessary so the
+    advisory lock acquired at the start of the request stays held across
+    all related inserts.
+    """
     # Convert userInputVar dict to JSON string for database storage
     user_input_var_json = None
     if deployment.userInputVar is not None:
@@ -180,9 +214,10 @@ def create_deployment(db: Session, deployment: DeploymentCreate, user_id: UUID) 
         userInputVar=user_input_var_json,
     )
     db.add(db_deployment)
-    db.commit()
+    db.flush()
     db.refresh(db_deployment)
     return db_deployment
+
 
 def delete_deployment(db: Session, deployment_id: UUID) -> bool:
     """Delete a deployment"""
@@ -198,7 +233,7 @@ def delete_deployment(db: Session, deployment_id: UUID) -> bool:
 def create_user_to_deployments(
     db: Session,
     deployment_id: UUID,
-    user_ids: set[UUID]
+    user_ids: set[UUID],
 ) -> list[UserToDeployment]:
     """
     Create UserToDeployment entries for multiple users

@@ -2,10 +2,9 @@ from datetime import datetime
 from typing import Any, Optional
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, EmailStr
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, model_validator
 
-from app.models import TaskStatus, TaskType, UserRole
-
+from app.models import OpenStackAuthType, TaskStatus, TaskType, UserRole
 
 # ----------------------------------------------------------------
 # USER SCHEMAS
@@ -14,9 +13,11 @@ class UserBase(BaseModel):
     email: EmailStr
     username: str
 
+
 class UserCreate(UserBase):
     role: UserRole = UserRole.STUDENT
     courseId: UUID | None = None
+
 
 class UserUpdate(BaseModel):
     email: EmailStr | None = None
@@ -36,17 +37,21 @@ class UserResponse(UserBase):
 
     model_config = ConfigDict(from_attributes=True)
 
+
 class UserWithCourse(UserResponse):
-    course: Optional['CourseResponse'] = None
+    course: Optional["CourseResponse"] = None
 
     model_config = ConfigDict(from_attributes=True)
+
 
 class Token(BaseModel):
     access_token: str
     token_type: str
 
+
 class TokenData(BaseModel):
     username: str | None = None
+
 
 # ----------------------------------------------------------------
 # COURSE SCHEMAS
@@ -54,21 +59,26 @@ class TokenData(BaseModel):
 class CourseBase(BaseModel):
     name: str
 
+
 class CourseCreate(CourseBase):
     pass
 
+
 class CourseUpdate(BaseModel):
     name: str | None = None
+
 
 class CourseResponse(CourseBase):
     courseId: UUID
 
     model_config = ConfigDict(from_attributes=True)
 
+
 class CourseWithUsers(CourseResponse):
     users: list[UserResponse] = []
 
     model_config = ConfigDict(from_attributes=True)
+
 
 # ----------------------------------------------------------------
 # APP SCHEMAS
@@ -78,14 +88,17 @@ class AppBase(BaseModel):
     description: str | None = None
     git_link: str | None = None
 
+
 class AppCreate(AppBase):
     pass
+
 
 class AppUpdate(BaseModel):
     name: str | None = None
     description: str | None = None
     git_link: str | None = None
     image: bytes | None = None
+
 
 class AppResponse(AppBase):
     appId: UUID
@@ -94,15 +107,18 @@ class AppResponse(AppBase):
 
     model_config = ConfigDict(from_attributes=True)
 
+
 class AppWithUser(AppResponse):
     user: UserResponse
 
     model_config = ConfigDict(from_attributes=True)
 
+
 class AppWithVersions(AppWithUser):
     versions: list[dict[str, str]] = []
 
     model_config = ConfigDict(from_attributes=True)
+
 
 # ----------------------------------------------------------------
 # DEPLOYMENT SCHEMAS
@@ -111,14 +127,17 @@ class Team(BaseModel):
     name: str
     userIds: list[str] = []
 
+
 class DeploymentBase(BaseModel):
     name: str
     appId: UUID
+
 
 class DeploymentCreate(DeploymentBase):
     releaseTag: str | None = None
     userInputVar: dict[str, Any] | None = None
     teams: list[Team] = []
+
 
 class DeploymentResponse(DeploymentBase):
     deploymentId: UUID
@@ -129,6 +148,7 @@ class DeploymentResponse(DeploymentBase):
     created_at: datetime | None = None
 
     model_config = ConfigDict(from_attributes=True)
+
 
 class DeploymentWithRelations(DeploymentResponse):
     user: UserResponse
@@ -144,6 +164,7 @@ class DeploymentTeamMember(BaseModel):
     username: str
 
     model_config = ConfigDict(from_attributes=True)
+
 
 class DeploymentTeamResponse(BaseModel):
     teamId: UUID
@@ -183,6 +204,7 @@ class DeploymentDetail(DeploymentWithRelations):
 
     model_config = ConfigDict(from_attributes=True)
 
+
 # ----------------------------------------------------------------
 # Task SCHEMAS
 # ----------------------------------------------------------------
@@ -197,8 +219,10 @@ class TaskBase(BaseModel):
     tf_state: str | None = None
     outputs: str | None = None
 
+
 class TaskCreate(TaskBase):
     pass
+
 
 class TaskUpdate(BaseModel):
     status: TaskStatus | None = None
@@ -208,11 +232,13 @@ class TaskUpdate(BaseModel):
     tf_state: str | None = None
     outputs: str | None = None
 
+
 class TaskResponse(TaskBase):
     taskId: UUID
     created_at: datetime
 
     model_config = ConfigDict(from_attributes=True)
+
 
 # ----------------------------------------------------------------
 # USER GROUP SCHEMAS
@@ -220,20 +246,24 @@ class TaskResponse(TaskBase):
 class UserGroupBase(BaseModel):
     deploymentId: UUID
 
+
 class UserGroupCreate(UserGroupBase):
     userIds: list[UUID] = []
     courseIds: list[UUID] = []
+
 
 class UserGroupResponse(UserGroupBase):
     userGroupId: UUID
 
     model_config = ConfigDict(from_attributes=True)
 
+
 class UserGroupWithMembers(UserGroupResponse):
     users: list[UserResponse] = []
     courses: list[CourseResponse] = []
 
     model_config = ConfigDict(from_attributes=True)
+
 
 # ----------------------------------------------------------------
 # TEAM SCHEMAS
@@ -242,21 +272,26 @@ class TeamBase(BaseModel):
     name: str
     userGroupId: UUID
 
+
 class TeamCreate(TeamBase):
     userIds: list[UUID] = []
 
+
 class TeamUpdate(BaseModel):
     name: str | None = None
+
 
 class TeamResponse(TeamBase):
     teamId: UUID
 
     model_config = ConfigDict(from_attributes=True)
 
+
 class TeamWithMembers(TeamResponse):
     users: list[UserResponse] = []
 
     model_config = ConfigDict(from_attributes=True)
+
 
 # ----------------------------------------------------------------
 # STATISTICS SCHEMAS
@@ -268,8 +303,76 @@ class UserStatistics(BaseModel):
     failed_deployments: int
     pending_deployments: int
 
+
 class CourseStatistics(BaseModel):
     total_students: int
     total_teachers: int
     total_apps: int
     total_deployments: int
+
+
+# ----------------------------------------------------------------
+# OPENSTACK CREDENTIAL SCHEMAS
+# ----------------------------------------------------------------
+class OpenStackCredentialBase(BaseModel):
+    """Non-secret connection metadata. Mirrors the `clouds.yaml` shape."""
+    auth_type: OpenStackAuthType
+    auth_url: str
+    region_name: Optional[str] = None
+    interface: Optional[str] = "public"
+    identity_api_version: Optional[str] = "3"
+    project_id: Optional[str] = None
+    project_name: Optional[str] = None
+    user_domain_name: Optional[str] = None
+    project_domain_name: Optional[str] = None
+
+
+class OpenStackCredentialUpsert(OpenStackCredentialBase):
+    """Body of PUT /me/openstack-credentials.
+
+    `identifier` is either a username (password auth) or an
+    application-credential ID. `secret` is the corresponding password or
+    application-credential secret. Both are stored encrypted at rest.
+    """
+    identifier: str = Field(..., min_length=1, description="username OR application-credential ID")
+    secret: str = Field(..., min_length=1, description="password OR application-credential secret")
+
+    @model_validator(mode="after")
+    def _validate_required_fields(self) -> "OpenStackCredentialUpsert":
+        if self.auth_type == OpenStackAuthType.PASSWORD:
+            if not self.user_domain_name:
+                raise ValueError("user_domain_name is required for password auth")
+            if not (self.project_id or self.project_name):
+                raise ValueError("project_id or project_name is required for password auth")
+        # application-credential auth: project_id is recommended but not required;
+        # the credential itself carries the project scope.
+        return self
+
+
+class OpenStackCredentialFromYaml(BaseModel):
+    """Convenience body: paste/upload a `clouds.yaml` and let the server pick it apart."""
+    clouds_yaml: str = Field(..., min_length=1, description="raw clouds.yaml file contents")
+    cloud_name: Optional[str] = Field(
+        None, description="Pick a specific cloud from the YAML; required when there is more than one"
+    )
+
+
+class OpenStackCredentialResponse(OpenStackCredentialBase):
+    """Masked response — never returns identifier/secret material.
+
+    When `has_credential` is False, base fields are absent/empty and the
+    consumer should branch on `has_credential`. `is_locked` and
+    `active_deployments` are populated regardless so the frontend can
+    render the appropriate guard UI even before any credential exists.
+    """
+    auth_type: Optional[OpenStackAuthType] = None  # type: ignore[assignment]
+    auth_url: Optional[str] = None  # type: ignore[assignment]
+    has_credential: bool = True
+    last_validated_at: Optional[datetime] = None
+    last_validation_error: Optional[str] = None
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+    is_locked: bool = False
+    active_deployments: int = 0
+
+    model_config = ConfigDict(from_attributes=True)

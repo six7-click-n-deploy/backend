@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import threading
 from contextlib import asynccontextmanager
@@ -6,8 +7,9 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import settings
-from app.routers import apps, auth_keycloak, courses, deployments, quotas, tasks, teams, users
+from app.routers import apps, auth_keycloak, courses, deployments, openstack_credentials, quotas, tasks, teams, users
 from app.services.celery_event_listener import start_event_listener
+from app.services.reconciler import run_reconciler
 
 logger = logging.getLogger(__name__)
 
@@ -25,13 +27,28 @@ async def lifespan(app: FastAPI):
     listener_thread.start()
     logger.info("✓ Celery event listener started in background")
 
+    # Reconciler is the safety net for events the listener missed (lost
+    # event, backend restart during dispatch, broker hiccups). It runs
+    # as an asyncio task so we can cancel it cleanly on shutdown.
+    reconciler_task = asyncio.create_task(run_reconciler())
+    logger.info("✓ Reconciler loop scheduled")
+
     logger.info("✓ Application started")
 
-    yield
+    try:
+        yield
+    finally:
+        # Shutdown
+        logger.info("=== Application Shutting Down ===")
+        reconciler_task.cancel()
+        try:
+            await reconciler_task
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            logger.exception("Reconciler task raised on shutdown")
+        logger.info("✓ Shutdown complete")
 
-    # Shutdown
-    logger.info("=== Application Shutting Down ===")
-    logger.info("✓ Shutdown complete")
 
 # ----------------------------------------------------------------
 # FASTAPI APP
@@ -65,6 +82,8 @@ app.include_router(deployments.router, prefix="/deployments", tags=["Deployments
 app.include_router(tasks.router, prefix="/tasks", tags=["Tasks"])
 app.include_router(teams.router, prefix="/teams", tags=["Teams"])
 app.include_router(quotas.router, prefix="/quotas", tags=["Quotas"])
+app.include_router(openstack_credentials.router, tags=["OpenStack Credentials"])
+
 
 # ----------------------------------------------------------------
 # HEALTH CHECK

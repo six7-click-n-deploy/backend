@@ -1,10 +1,14 @@
 import json
+import logging
+from typing import Optional
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
 from app.crud import deployments as crud_deployments
+from app.crud import locks as crud_locks
+from app.crud import openstack_credentials as crud_openstack_credentials
 from app.crud import teams as crud_teams
 from app.database import get_db
 from app.models import TaskType, User
@@ -17,10 +21,11 @@ from app.schemas import (
     DeploymentTeamResponse,
     TaskSummary,
 )
-from app.services.task_service import task_service
+from app.services import task_service as task_service_module
 from app.utils.keycloak_auth import get_current_user_keycloak
-from app.utils.permissions import ensure_resource_access
+from app.utils.permissions import ensure_deployment_access
 
+logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
@@ -31,31 +36,24 @@ router = APIRouter()
 def list_deployments(
     skip: int = 0,
     limit: int = 100,
-    user_id: UUID | None = None,
-    app_id: UUID | None = None,
-    status_filter: str | None = None,
+    app_id: Optional[UUID] = None,
+    status_filter: Optional[str] = None,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user_keycloak)
 ):
     """
-    Get all deployments with optional filters
-    - **Students**: Can only see their own deployments
-    - **Teachers/Admins**: Can see all deployments
-    """
-    # Students can only see their own deployments
-    if current_user.role.value == "student" and not user_id:
-        user_id = current_user.userId
-    elif current_user.role.value == "student" and user_id != current_user.userId:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="You can only view your own deployments"
-        )
+    Get all deployments owned by the current user.
 
+    Listing is always scoped to the requester regardless of role — teachers
+    and admins still only see their own deployments in the index. Cross-user
+    access happens explicitly through `GET /deployments/{deployment_id}`,
+    which is gated by `ensure_resource_access`.
+    """
     deployments = crud_deployments.get_deployments(
         db,
         skip=skip,
         limit=limit,
-        user_id=user_id,
+        user_id=current_user.userId,
         app_id=app_id,
         status=status_filter
     )
@@ -113,7 +111,7 @@ def get_deployment(
         )
 
     # Check access permission
-    ensure_resource_access(deployment.userId, current_user)
+    ensure_deployment_access(deployment, current_user, db)
 
     # Get latest task
     latest_task = crud_deployments.get_latest_task(db, deployment_id)
@@ -195,16 +193,26 @@ def create_deployment(
 ):
     """
     Create a new deployment
-    - **All authenticated users** can create deployments
-    - Deployment is initially set to PENDING status
+
+    Atomicity: a per-user advisory lock serializes credential mutation
+    with deployment dispatch. The deployment row, teams, user mappings,
+    and the initial PENDING task row are all inserted in a single
+    transaction, so the user can never end up with a deployment row
+    that has no matching task. Celery dispatch happens AFTER commit;
+    if it fails, the task row is flipped to FAILED so the deployment
+    surfaces an honest error instead of hanging in PENDING forever.
     """
-    db_deployment = crud_deployments.create_deployment(db, deployment, current_user.userId)
+    # Per-user lock — serializes against PUT /me/openstack-credentials
+    # and any other concurrent POST /deployments from this user. Held
+    # until the next COMMIT/ROLLBACK on this connection.
+    crud_locks.acquire_user_xact_lock(db, current_user.userId)
 
-    # Create teams and collect all user IDs
+    db_deployment = crud_deployments.create_deployment(
+        db, deployment, current_user.userId
+    )
+
     user_ids_in_deployment = set()
-
     if deployment.teams:
-        # Teams data should already have correct userIds from frontend
         teams_data = [
             {"name": team.name, "userIds": team.userIds}
             for team in deployment.teams
@@ -212,78 +220,106 @@ def create_deployment(
         crud_teams.create_teams_for_deployment(
             db=db,
             deployment_id=db_deployment.deploymentId,
-            teams_data=teams_data
+            teams_data=teams_data,
         )
-
-        # Collect all user IDs from teams
         for team in deployment.teams:
             user_ids_in_deployment.update(team.userIds)
 
-    # Create UserToDeployment entries
     if user_ids_in_deployment:
         crud_deployments.create_user_to_deployments(
             db=db,
             deployment_id=db_deployment.deploymentId,
-            user_ids=user_ids_in_deployment
+            user_ids=user_ids_in_deployment,
         )
 
-    db.commit()
-    db.refresh(db_deployment)
-
+    # Parse user input variables
     try:
-        """
-        Parse user input variables
-        structure: {
-            packer : {
-                "variable_name": "value",
-                ...
-            },
-            terraform: {
-                "variable_name": "value",
-                ...
-            }
-        }
-        """
-        # TODO: Verify and validate user input variables against structure definition
-        user_vars = json.loads(db_deployment.userInputVar) if db_deployment.userInputVar else {}
+        user_vars = (
+            json.loads(db_deployment.userInputVar) if db_deployment.userInputVar else {}
+        )
     except Exception:
         user_vars = {}
 
     # Format teams for Terraform (team_name: [user_emails])
     teams_dict = {}
     if deployment.teams:
+        from app.crud import users as crud_users
         for team in deployment.teams:
-            # Get user emails from user IDs
-            from app.crud import users as crud_users
             team_users = []
             for user_id in team.userIds:
                 user = crud_users.get_user(db, user_id)
                 if user:
                     team_users.append({"email": user.email})
-
             teams_dict[team.name] = team_users
 
-    # Start deployment task
-    task, celery_task_id = task_service.register_new_task(
-        db=db,
-        deployment_id=db_deployment.deploymentId,
-        task_type=TaskType.DEPLOY,
-        celery_task_name="tasks.deploy_application",
-        celery_args=[
-            str(db_deployment.deploymentId),
-            str(db_deployment.appId),
-            db_deployment.app.git_link,
-            db_deployment.releaseTag,
-            user_vars,
-            teams_dict  # Teams mit User-Emails
-        ],
-    )
+    # Per-user OpenStack credentials are required to deploy. The envelope
+    # carries ciphertext only — the worker decrypts in-process. Reading
+    # this inside the locked TX guarantees the envelope matches whatever
+    # credential row a concurrent PUT might have committed: PUT is
+    # serialized behind us by the same advisory lock.
+    try:
+        openstack_envelope = crud_openstack_credentials.get_dispatch_envelope(
+            db, current_user.userId
+        )
+    except crud_openstack_credentials.NoCredentialError:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_412_PRECONDITION_FAILED,
+            detail={"reason": "openstack_credentials_missing"},
+        )
 
-    # Get status and created_at from the task we just created
+    # Insert PENDING task row in the SAME transaction as the deployment.
+    # If anything below fails before commit, the rollback drops both —
+    # no orphan rows.
+    try:
+        task = task_service_module.prepare_task_in_tx(
+            db,
+            deployment_id=db_deployment.deploymentId,
+            task_type=TaskType.DEPLOY,
+        )
+    except task_service_module.ActiveTaskExistsError:
+        # Should be impossible on a freshly inserted deployment, but
+        # the partial unique index would catch it too.
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Deployment already has an active task",
+        )
+
+    # Atomic commit: deployment + teams + user_to_deployments + task row.
+    # The advisory lock is released here.
+    db.commit()
+    db.refresh(db_deployment)
+    db.refresh(task)
+
+    # Dispatch to Celery OUTSIDE the locked TX. On failure the task row
+    # is flipped to FAILED in a fresh TX (handled in dispatch_to_celery)
+    # and we surface 503 — the deployment row stays, but the user sees
+    # an obvious failure instead of an eternal PENDING.
+    try:
+        task, _celery_id = task_service_module.dispatch_to_celery(
+            db,
+            task=task,
+            celery_task_name="tasks.deploy_application",
+            celery_args=[
+                str(db_deployment.deploymentId),
+                str(db_deployment.appId),
+                db_deployment.app.git_link,
+                db_deployment.releaseTag,
+                user_vars,
+                teams_dict,
+                openstack_envelope,
+            ],
+        )
+    except Exception:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Could not dispatch deployment task — please retry",
+        )
+
     status_value = crud_deployments.get_deployment_status(db, db_deployment.deploymentId)
     created_at = crud_deployments.get_deployment_created_at(db, db_deployment.deploymentId)
 
-    # Parse userInputVar for response
     user_input_var_parsed = None
     if db_deployment.userInputVar:
         try:
@@ -324,7 +360,7 @@ def delete_deployment(
         )
 
     # Check access permission
-    ensure_resource_access(deployment.userId, current_user)
+    ensure_deployment_access(deployment, current_user, db)
 
     success = crud_deployments.delete_deployment(db, deployment_id)
     if not success:

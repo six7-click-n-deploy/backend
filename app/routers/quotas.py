@@ -1,8 +1,19 @@
+import logging
+
 import openstack
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel
+from sqlalchemy.orm import Session
+
+from app.crud import openstack_credentials as crud_creds
+from app.database import get_db
+from app.models import User
+from app.utils.keycloak_auth import get_current_user_keycloak
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
 
 class QuotaItem(BaseModel):
     used: int
@@ -10,15 +21,18 @@ class QuotaItem(BaseModel):
     available: int
     unit: str | None = None
 
+
 class ComputeQuotas(BaseModel):
     instances: QuotaItem
     vcpus: QuotaItem
     ram: QuotaItem
 
+
 class StorageQuotas(BaseModel):
     volumes: QuotaItem
     snapshots: QuotaItem
     gigabytes: QuotaItem
+
 
 class NetworkQuotas(BaseModel):
     floating_ips: QuotaItem
@@ -28,27 +42,65 @@ class NetworkQuotas(BaseModel):
     ports: QuotaItem
     routers: QuotaItem
 
+
 class QuotaOverviewResponse(BaseModel):
     compute: ComputeQuotas
     storage: StorageQuotas
     network: NetworkQuotas
 
 
-def get_openstack_conn():
-    """Erstellt OpenStack Connection aus clouds.yaml"""
-    return openstack.connect(cloud='openstack')
+def _build_connect_kwargs(creds: dict) -> dict:
+    base = {
+        "auth_url": creds["auth_url"],
+        "region_name": creds.get("region_name"),
+        "interface": creds.get("interface") or "public",
+        "identity_api_version": creds.get("identity_api_version") or "3",
+    }
+    if creds["auth_type"] == "v3applicationcredential":
+        base.update({
+            "auth_type": "v3applicationcredential",
+            "application_credential_id": creds["identifier"],
+            "application_credential_secret": creds["secret"],
+        })
+    else:
+        base.update({
+            "auth_type": "password",
+            "username": creds["identifier"],
+            "password": creds["secret"],
+            "project_id": creds.get("project_id"),
+            "project_name": creds.get("project_name"),
+            "user_domain_name": creds.get("user_domain_name"),
+            "project_domain_name": creds.get("project_domain_name") or creds.get("user_domain_name"),
+        })
+    return base
+
+
+def _get_openstack_conn_for_user(db: Session, user: User):
+    """Build a per-user OpenStack connection from the stored credential row."""
+    try:
+        creds = crud_creds.get_decrypted_for_backend(db, user.userId)
+    except crud_creds.NoCredentialError:
+        raise HTTPException(
+            status_code=status.HTTP_412_PRECONDITION_FAILED,
+            detail={"reason": "openstack_credentials_missing"},
+        )
+    return openstack.connect(**_build_connect_kwargs(creds))
 
 
 @router.get("/overview", response_model=QuotaOverviewResponse)
-async def get_quota_overview():
+async def get_quota_overview(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user_keycloak),
+):
     """
-    Holt OpenStack Quota-Übersicht für Compute, Storage und Network.
+    Holt OpenStack Quota-Übersicht für Compute, Storage und Network
+    aus dem **persönlichen** OpenStack-Projekt des Users.
 
     Returns:
         QuotaOverviewResponse mit used/limit/available für alle Ressourcen
     """
     try:
-        conn = get_openstack_conn()
+        conn = _get_openstack_conn_for_user(db, current_user)
         project_id = conn.current_project_id
 
         # === COMPUTE QUOTAS ===
@@ -74,8 +126,9 @@ async def get_quota_overview():
                     unit="MB"
                 )
             )
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=f"Failed to fetch compute quotas: {str(e)}") from e
+        except Exception:
+            logger.exception("Failed to fetch compute quotas for user")
+            raise HTTPException(status_code=500, detail="Failed to fetch compute quotas")
 
         # === STORAGE QUOTAS ===
         volume_limits = conn.volume.get_quota_set(project_id)
@@ -153,8 +206,12 @@ async def get_quota_overview():
 
         return QuotaOverviewResponse(compute=compute, storage=storage, network=network)
 
-    except Exception as e:
+    except HTTPException:
+        # Preserve the 412 Precondition Failed when credentials are missing.
+        raise
+    except Exception:
+        logger.exception("Failed to fetch quotas for user")
         raise HTTPException(
             status_code=500,
-            detail=f"Failed to fetch quotas: {str(e)}"
-        ) from e
+            detail="Failed to fetch quotas",
+        )
