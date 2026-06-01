@@ -11,6 +11,7 @@ from app.routers import (
     apps,
     auth_keycloak,
     courses,
+    dashboard,
     deployments,
     openstack_credentials,
     quotas,
@@ -92,6 +93,7 @@ app.include_router(deployments.router, prefix="/deployments", tags=["Deployments
 app.include_router(tasks.router, prefix="/tasks", tags=["Tasks"])
 app.include_router(teams.router, prefix="/teams", tags=["Teams"])
 app.include_router(quotas.router, prefix="/quotas", tags=["Quotas"])
+app.include_router(dashboard.router, prefix="/dashboard", tags=["Dashboard"])
 app.include_router(openstack_credentials.router, tags=["OpenStack Credentials"])
 
 
