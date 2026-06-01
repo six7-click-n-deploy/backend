@@ -69,7 +69,7 @@ jobs:
         run: poetry run pytest -m unit -v
         env:
           DATABASE_URL: "postgresql://test:test@localhost:5432/test"
-          CREDENTIAL_ENCRYPTION_KEY: "dGVzdC1rZXktMzItYnl0ZXMtbG9uZy10ZXN0a2V5"
+          CREDENTIAL_ENCRYPTION_KEY: "Q1PNlFd4It9oQPtjCcXcmB7wGDkY4w8KwpIRNSF4u7U="
           KEYCLOAK_SERVER_URL: "http://localhost:8080"
           KEYCLOAK_REALM: "dhbw"
           KEYCLOAK_CLIENT_ID: "appstore-backend"
@@ -120,7 +120,7 @@ jobs:
         run: poetry run pytest -m integration -v
         env:
           DATABASE_URL: "postgresql://test:test@localhost:5432/test"
-          CREDENTIAL_ENCRYPTION_KEY: "dGVzdC1rZXktMzItYnl0ZXMtbG9uZy10ZXN0a2V5"
+          CREDENTIAL_ENCRYPTION_KEY: "Q1PNlFd4It9oQPtjCcXcmB7wGDkY4w8KwpIRNSF4u7U="
           KEYCLOAK_SERVER_URL: "http://localhost:8080"
           KEYCLOAK_REALM: "dhbw"
           KEYCLOAK_CLIENT_ID: "appstore-backend"
@@ -171,7 +171,7 @@ jobs:
         run: poetry run pytest -m api -v --cov=app --cov-report=xml --cov-report=term
         env:
           DATABASE_URL: "postgresql://test:test@localhost:5432/test"
-          CREDENTIAL_ENCRYPTION_KEY: "dGVzdC1rZXktMzItYnl0ZXMtbG9uZy10ZXN0a2V5"
+          CREDENTIAL_ENCRYPTION_KEY: "Q1PNlFd4It9oQPtjCcXcmB7wGDkY4w8KwpIRNSF4u7U="
           KEYCLOAK_SERVER_URL: "http://localhost:8080"
           KEYCLOAK_REALM: "dhbw"
           KEYCLOAK_CLIENT_ID: "appstore-backend"
