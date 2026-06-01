@@ -7,14 +7,12 @@ otherwise has no consistent timeout knob across releases.
 from __future__ import annotations
 
 import socket
-from typing import Tuple
 
 import openstack
 from openstack import exceptions as os_exc
 
 from app.models import OpenStackAuthType
 from app.schemas import OpenStackCredentialUpsert
-
 
 _TIMEOUT_SECONDS = 15
 
@@ -46,7 +44,7 @@ def _build_connect_kwargs(payload: OpenStackCredentialUpsert) -> dict:
     return base
 
 
-def validate(payload: OpenStackCredentialUpsert) -> Tuple[bool, str | None]:
+def validate(payload: OpenStackCredentialUpsert) -> tuple[bool, str | None]:
     """Try to authorize. Returns (ok, error_message).
 
     The error message is short and human-readable — safe to surface in the
@@ -66,7 +64,7 @@ def validate(payload: OpenStackCredentialUpsert) -> Tuple[bool, str | None]:
         if status == 404:
             return False, "Project or domain not found"
         return False, f"OpenStack rejected request (HTTP {status or '?'})"
-    except (socket.timeout, socket.gaierror) as e:
+    except (TimeoutError, socket.gaierror) as e:
         return False, f"Could not reach auth_url: {e}"
     except os_exc.SDKException as e:
         return False, f"OpenStack SDK error: {type(e).__name__}"

@@ -1,6 +1,5 @@
 import json
 import logging
-from typing import Optional
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -36,8 +35,8 @@ router = APIRouter()
 def list_deployments(
     skip: int = 0,
     limit: int = 100,
-    app_id: Optional[UUID] = None,
-    status_filter: Optional[str] = None,
+    app_id: UUID | None = None,
+    status_filter: str | None = None,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user_keycloak)
 ):

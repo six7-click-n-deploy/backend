@@ -1,5 +1,5 @@
 import json
-from typing import Any, Optional
+from typing import Any
 from uuid import UUID
 
 from sqlalchemy import desc, exists
@@ -37,7 +37,7 @@ def has_active_user_deployment(db: Session, user_id: UUID) -> bool:
     )
 
 
-def get_deployment(db: Session, deployment_id: UUID) -> Optional[Deployment]:
+def get_deployment(db: Session, deployment_id: UUID) -> Deployment | None:
     """Get deployment by ID"""
     return db.query(Deployment).filter(Deployment.deploymentId == deployment_id).first()
 

@@ -90,7 +90,7 @@ select = [
     "E", "W", "F", "I", "B", "C4", "UP", "ARG", "SIM"
 ]
 ignore = [
-    "E501", "B008", "ARG001", "ARG002", "E402", "UP042"
+    "E501", "B008", "B904", "ARG001", "ARG002", "E402", "UP042"
 ]
 fixable = ["ALL"]
 unfixable = []

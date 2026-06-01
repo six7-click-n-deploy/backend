@@ -7,7 +7,17 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import settings
-from app.routers import apps, auth_keycloak, courses, deployments, openstack_credentials, quotas, tasks, teams, users
+from app.routers import (
+    apps,
+    auth_keycloak,
+    courses,
+    deployments,
+    openstack_credentials,
+    quotas,
+    tasks,
+    teams,
+    users,
+)
 from app.services.celery_event_listener import start_event_listener
 from app.services.reconciler import run_reconciler
 

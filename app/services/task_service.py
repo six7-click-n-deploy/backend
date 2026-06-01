@@ -22,7 +22,6 @@ from __future__ import annotations
 
 import logging
 import uuid
-from typing import Tuple
 
 from sqlalchemy.orm import Session
 
@@ -78,7 +77,7 @@ def dispatch_to_celery(
     task: Task,
     celery_task_name: str,
     celery_args: list,
-) -> Tuple[Task, str]:
+) -> tuple[Task, str]:
     """Push a prepared task to Celery.
 
     MUST be called after the surrounding TX committed. Runs in fresh

@@ -6,6 +6,7 @@ from pydantic import BaseModel, ConfigDict, EmailStr, Field, model_validator
 
 from app.models import OpenStackAuthType, TaskStatus, TaskType, UserRole
 
+
 # ----------------------------------------------------------------
 # USER SCHEMAS
 # ----------------------------------------------------------------
@@ -318,13 +319,13 @@ class OpenStackCredentialBase(BaseModel):
     """Non-secret connection metadata. Mirrors the `clouds.yaml` shape."""
     auth_type: OpenStackAuthType
     auth_url: str
-    region_name: Optional[str] = None
-    interface: Optional[str] = "public"
-    identity_api_version: Optional[str] = "3"
-    project_id: Optional[str] = None
-    project_name: Optional[str] = None
-    user_domain_name: Optional[str] = None
-    project_domain_name: Optional[str] = None
+    region_name: str | None = None
+    interface: str | None = "public"
+    identity_api_version: str | None = "3"
+    project_id: str | None = None
+    project_name: str | None = None
+    user_domain_name: str | None = None
+    project_domain_name: str | None = None
 
 
 class OpenStackCredentialUpsert(OpenStackCredentialBase):
@@ -352,7 +353,7 @@ class OpenStackCredentialUpsert(OpenStackCredentialBase):
 class OpenStackCredentialFromYaml(BaseModel):
     """Convenience body: paste/upload a `clouds.yaml` and let the server pick it apart."""
     clouds_yaml: str = Field(..., min_length=1, description="raw clouds.yaml file contents")
-    cloud_name: Optional[str] = Field(
+    cloud_name: str | None = Field(
         None, description="Pick a specific cloud from the YAML; required when there is more than one"
     )
 
@@ -365,13 +366,13 @@ class OpenStackCredentialResponse(OpenStackCredentialBase):
     `active_deployments` are populated regardless so the frontend can
     render the appropriate guard UI even before any credential exists.
     """
-    auth_type: Optional[OpenStackAuthType] = None  # type: ignore[assignment]
-    auth_url: Optional[str] = None  # type: ignore[assignment]
+    auth_type: OpenStackAuthType | None = None  # type: ignore[assignment]
+    auth_url: str | None = None  # type: ignore[assignment]
     has_credential: bool = True
-    last_validated_at: Optional[datetime] = None
-    last_validation_error: Optional[str] = None
-    created_at: Optional[datetime] = None
-    updated_at: Optional[datetime] = None
+    last_validated_at: datetime | None = None
+    last_validation_error: str | None = None
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
     is_locked: bool = False
     active_deployments: int = 0
 

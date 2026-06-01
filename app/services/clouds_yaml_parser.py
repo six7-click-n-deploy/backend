@@ -7,14 +7,11 @@ a message the UI can render verbatim.
 """
 from __future__ import annotations
 
-from typing import Optional
-
 import yaml
 from fastapi import HTTPException, status
 
 from app.models import OpenStackAuthType
 from app.schemas import OpenStackCredentialUpsert
-
 
 _SUPPORTED_AUTH_TYPES = {
     "v3applicationcredential": OpenStackAuthType.APPLICATION_CREDENTIAL,
@@ -29,7 +26,7 @@ def _bad(msg: str) -> HTTPException:
     return HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=msg)
 
 
-def parse(clouds_yaml: str, cloud_name: Optional[str] = None) -> OpenStackCredentialUpsert:
+def parse(clouds_yaml: str, cloud_name: str | None = None) -> OpenStackCredentialUpsert:
     try:
         doc = yaml.safe_load(clouds_yaml)
     except yaml.YAMLError as e:

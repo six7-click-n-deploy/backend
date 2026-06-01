@@ -5,16 +5,15 @@ from collections.abc import Callable
 from functools import wraps
 
 from fastapi import Depends, HTTPException, status
-
 from sqlalchemy.orm import Session
 
 from app.models import (
+    Deployment,
+    Team,
     User,
     UserRole,
-    Deployment,
     UserToDeployment,
     UserToTeam,
-    Team,
 )
 from app.utils.keycloak_auth import get_current_user_keycloak as get_current_user
 
