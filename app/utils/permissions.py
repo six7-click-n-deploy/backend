@@ -5,7 +5,16 @@ from functools import wraps
 from fastapi import HTTPException, status, Depends
 from typing import List, Callable
 
-from app.models import User, UserRole
+from sqlalchemy.orm import Session
+
+from app.models import (
+    User,
+    UserRole,
+    Deployment,
+    UserToDeployment,
+    UserToTeam,
+    Team,
+)
 from app.utils.keycloak_auth import get_current_user_keycloak as get_current_user
 
 
@@ -124,3 +133,62 @@ def ensure_course_access(course_id: str, current_user: User):
             status_code=status.HTTP_403_FORBIDDEN,
             detail="You don't have permission to access this course"
         )
+
+
+# ----------------------------------------------------------------
+# DEPLOYMENT ACCESS (Owner / Team-Member / Teacher / Admin)
+# ----------------------------------------------------------------
+def has_deployment_access(deployment: Deployment, user: User, db: Session) -> bool:
+    """
+    Return True if `user` may read/manage `deployment`.
+
+    Allowed when any of:
+      - user is teacher or admin
+      - user is the deployment owner
+      - user is part of any team assigned to this deployment
+        (via UserToTeam joined to Team.deploymentId)
+      - user appears in UserToDeployment for this deployment
+    """
+    if user.role in (UserRole.TEACHER, UserRole.ADMIN):
+        return True
+    if str(deployment.userId) == str(user.userId):
+        return True
+
+    team_match = (
+        db.query(UserToTeam.userToTeamId)
+        .join(Team, Team.teamId == UserToTeam.teamId)
+        .filter(
+            Team.deploymentId == deployment.deploymentId,
+            UserToTeam.userId == user.userId,
+        )
+        .first()
+    )
+    if team_match:
+        return True
+
+    direct_match = (
+        db.query(UserToDeployment.userToDeploymentId)
+        .filter(
+            UserToDeployment.deploymentId == deployment.deploymentId,
+            UserToDeployment.userId == user.userId,
+        )
+        .first()
+    )
+    return direct_match is not None
+
+
+def ensure_deployment_access(deployment: Deployment, user: User, db: Session) -> None:
+    """
+    Raise 403 unless `user` may access `deployment`.
+
+    Use this in every endpoint that takes a deployment_id from the URL/body
+    to prevent IDOR. Pass the loaded Deployment, not just the ID — callers
+    should already have fetched it (and should return 404 if missing before
+    calling this).
+    """
+    if not has_deployment_access(deployment, user, db):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You don't have permission to access this deployment",
+        )
+
