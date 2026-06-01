@@ -203,17 +203,53 @@ def start_event_listener():
                     "tf_state": None,
                     "outputs": None,
                 }
-                # Try to extract structured failure data from traceback
+                # Try to extract structured failure data.
+                #
+                # The worker raises ``Failure`` (see worker/app/tasks.py) whose
+                # ``args[0]`` is a JSON payload with logs/tf_state/etc. There
+                # are two surface forms depending on whether Celery picks up
+                # the exception cleanly:
+                #
+                #  1. clean pickle round-trip (preferred path):
+                #     ``Failure: {"error": ..., ...}`` in the traceback's
+                #     final line, AND ``Failure('{"error": ...}')`` in
+                #     ``event['exception']`` (Celery uses ``safe_repr``).
+                #  2. legacy ``UnpickleableExceptionWrapper`` path (before
+                #     Failure had ``__reduce__``): ``Failure('...')``
+                #     literally inside the traceback.
+                #
+                # Match both. Search the exception field first because it's a
+                # short, well-defined string; fall back to the full traceback.
                 try:
                     import re
-                    match = re.search(r"Failure\('(.+)'\)", traceback, re.DOTALL)
-                    if match:
+                    candidates = [str(exception_type or ''), traceback or '']
+                    failure_data = None
+                    for haystack in candidates:
+                        if not haystack:
+                            continue
+                        # Form 1a: Failure('<json>')  — repr() / wrapper output
+                        # Form 1b: Failure: <json>    — format_exception output
+                        match = (
+                            re.search(r"Failure\('(.+?)'\)", haystack, re.DOTALL)
+                            or re.search(r"Failure:\s*(\{.+?\})\s*$", haystack, re.DOTALL)
+                        )
+                        if not match:
+                            continue
                         json_str = match.group(1)
                         try:
                             failure_data = json.loads(json_str)
                         except json.JSONDecodeError:
-                            json_str = json_str.encode('utf-8').decode('unicode_escape')
-                            failure_data = json.loads(json_str)
+                            # Form 1a wraps the JSON in repr(), so embedded
+                            # quotes are backslash-escaped. Decode once.
+                            try:
+                                failure_data = json.loads(
+                                    json_str.encode('utf-8').decode('unicode_escape')
+                                )
+                            except (json.JSONDecodeError, UnicodeDecodeError):
+                                continue
+                        break
+
+                    if failure_data is not None:
                         # logs
                         logs_data = failure_data.get('logs')
                         if logs_data is not None:
