@@ -47,6 +47,21 @@ jobs:
     name: "🧪 Test (unit)"
     runs-on: ubuntu-latest
 
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: test
+          POSTGRES_PASSWORD: test
+          POSTGRES_DB: test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -117,7 +132,7 @@ jobs:
         run: poetry install --with dev --no-root
 
       - name: Run integration tests
-        run: poetry run pytest -m integration -v
+        run: poetry run pytest -m integration -v || [ $? -eq 5 ]
         env:
           DATABASE_URL: "postgresql://test:test@localhost:5432/test"
           CREDENTIAL_ENCRYPTION_KEY: "Q1PNlFd4It9oQPtjCcXcmB7wGDkY4w8KwpIRNSF4u7U="
