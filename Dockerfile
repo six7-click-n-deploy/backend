@@ -66,6 +66,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
+# Upgrade base-image Python tooling (pip / setuptools / wheel) to pull
+# in security fixes that the upstream `python:3.11-slim` tag hasn't
+# picked up yet. Trivy scans these system site-packages — anything
+# HIGH/CRITICAL here blocks the push.
+RUN pip install --no-cache-dir --upgrade pip setuptools wheel
+
 # Create application directory
 WORKDIR $APP_HOME
 
