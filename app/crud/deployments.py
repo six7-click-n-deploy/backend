@@ -36,14 +36,29 @@ def has_active_user_deployment(db: Session, user_id: UUID) -> bool:
     )
 
 
-def get_deployment(db: Session, deployment_id: UUID) -> Optional[Deployment]:
-    """Get deployment by ID"""
-    return db.query(Deployment).filter(Deployment.deploymentId == deployment_id).first()
+def get_deployment(
+    db: Session,
+    deployment_id: UUID,
+    include_deleted: bool = False,
+) -> Optional[Deployment]:
+    """Get deployment by ID. Hides soft-deleted rows by default.
+
+    ``include_deleted=True`` is for the rare audit/restore lookup; the
+    HTTP API never sets it.
+    """
+    q = db.query(Deployment).filter(Deployment.deploymentId == deployment_id)
+    if not include_deleted:
+        q = q.filter(Deployment.deleted_at.is_(None))
+    return q.first()
 
 
-def get_deployment_with_details(db: Session, deployment_id: UUID) -> Optional[Deployment]:
-    """Get deployment by ID with all relations loaded"""
-    return (
+def get_deployment_with_details(
+    db: Session,
+    deployment_id: UUID,
+    include_deleted: bool = False,
+) -> Optional[Deployment]:
+    """Get deployment by ID with all relations loaded. Hides soft-deleted by default."""
+    q = (
         db.query(Deployment)
         .options(
             joinedload(Deployment.user),
@@ -51,8 +66,10 @@ def get_deployment_with_details(db: Session, deployment_id: UUID) -> Optional[De
             joinedload(Deployment.teams),
         )
         .filter(Deployment.deploymentId == deployment_id)
-        .first()
     )
+    if not include_deleted:
+        q = q.filter(Deployment.deleted_at.is_(None))
+    return q.first()
 
 
 def get_latest_task(db: Session, deployment_id: UUID) -> Optional[Task]:
@@ -77,11 +94,31 @@ def get_first_task(db: Session, deployment_id: UUID) -> Optional[Task]:
 
 
 def get_deployment_status(db: Session, deployment_id: UUID) -> Optional[str]:
-    """Get current status from the latest task"""
+    """Effective deployment status, derived from the latest task.
+
+    The bare ``task.status`` (pending/running/success/failed/cancelled) is
+    not enough by itself: a destroy task in flight should surface as
+    ``destroying`` and a finished destroy as ``destroyed``, neither of
+    which exists as a stored enum value. We synthesize them on the fly
+    from ``(task.type, task.status)``.
+
+    Returns ``None`` if the deployment has no tasks yet.
+    """
     task = get_latest_task(db, deployment_id)
-    if task:
-        return task.status.value if task.status else None
-    return None
+    if task is None or task.status is None:
+        return None
+
+    raw_status = task.status.value
+    raw_type = task.type.value if task.type else None
+
+    if raw_type == "destroy":
+        if raw_status in ("pending", "running"):
+            return "destroying"
+        if raw_status == "success":
+            return "destroyed"
+        # failed/cancelled bleed through unchanged so the user sees that
+        # the destroy itself broke (vs. the original deploy succeeded).
+    return raw_status
 
 
 def get_deployment_created_at(db: Session, deployment_id: UUID):
@@ -152,22 +189,59 @@ def get_deployments(
     skip: int = 0,
     limit: int = 100,
     user_id: Optional[UUID] = None,
+    member_user_id: Optional[UUID] = None,
     app_id: Optional[UUID] = None,
     status: Optional[str] = None,
+    include_deleted: bool = False,
 ) -> List[Deployment]:
-    """Get deployments with optional filters"""
+    """Get deployments with optional filters. Hides soft-deleted by default.
+
+    ``user_id`` filters by deployment owner (``Deployment.userId``).
+
+    ``member_user_id`` filters by **either** owner or membership: a
+    deployment matches when the user is the creator OR appears in any
+    team's ``UserToTeam`` row OR has a direct ``UserToDeployment``
+    mapping. Used by the listing endpoint so a student sees deployments
+    they were added to without seeing every deployment in the system.
+    Mutually exclusive with ``user_id``; if both are set ``user_id``
+    wins (caller bug, but the stricter filter is the safer default).
+    """
     query = db.query(Deployment)
-    
+
+    if not include_deleted:
+        # Backed by the partial index ix_deployments_live so this stays
+        # cheap even with many rows.
+        query = query.filter(Deployment.deleted_at.is_(None))
     if user_id:
         query = query.filter(Deployment.userId == user_id)
+    elif member_user_id:
+        # Owner OR team member OR direct mapping. Use a UNION-ish
+        # approach via a subquery on teamIds the user belongs to so
+        # the OR doesn't explode into a cartesian.
+        from app.models import UserToTeam
+        member_team_ids = (
+            db.query(UserToTeam.teamId).filter(UserToTeam.userId == member_user_id)
+        )
+        member_deployment_ids_via_teams = (
+            db.query(Team.deploymentId).filter(Team.teamId.in_(member_team_ids))
+        )
+        member_deployment_ids_direct = (
+            db.query(UserToDeployment.deploymentId)
+            .filter(UserToDeployment.userId == member_user_id)
+        )
+        query = query.filter(
+            (Deployment.userId == member_user_id)
+            | (Deployment.deploymentId.in_(member_deployment_ids_via_teams))
+            | (Deployment.deploymentId.in_(member_deployment_ids_direct))
+        )
     if app_id:
         query = query.filter(Deployment.appId == app_id)
-    
+
     # Order by deploymentId (UUID) - could also join with Task for created_at ordering
     query = query.order_by(desc(Deployment.deploymentId))
-    
+
     deployments = query.offset(skip).limit(limit).all()
-    
+
     # Filter by status if specified (requires checking latest task)
     if status:
         filtered = []
@@ -176,7 +250,7 @@ def get_deployments(
             if latest_task and latest_task.status and latest_task.status.value == status:
                 filtered.append(deployment)
         return filtered
-    
+
     return deployments
 
 
@@ -217,15 +291,31 @@ def create_deployment(db: Session, deployment: DeploymentCreate, user_id: UUID) 
     db.refresh(db_deployment)
     return db_deployment
 
-def delete_deployment(db: Session, deployment_id: UUID) -> bool:
-    """Delete a deployment"""
+def soft_delete_deployment(db: Session, deployment_id: UUID) -> bool:
+    """Mark a deployment as deleted without removing the row.
+
+    Sets ``deleted_at = utcnow()`` so default queries skip it. The
+    related tasks/teams/user-mappings are intentionally untouched —
+    they're useful for audit and the partial-unique index on active
+    tasks already prevents the deployment from accepting new work.
+
+    Returns ``False`` if the deployment doesn't exist (or was already
+    deleted), ``True`` on a successful soft-delete.
+    """
+    from datetime import datetime
+
     db_deployment = get_deployment(db, deployment_id)
     if not db_deployment:
         return False
-    
-    db.delete(db_deployment)
+    db_deployment.deleted_at = datetime.utcnow()
     db.commit()
     return True
+
+
+# Back-compat alias. The old hard-delete contract no longer exists; any
+# remaining caller now soft-deletes. New code should call
+# ``soft_delete_deployment`` directly.
+delete_deployment = soft_delete_deployment
 
 
 def create_user_to_deployments(

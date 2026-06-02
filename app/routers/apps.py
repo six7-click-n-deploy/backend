@@ -11,8 +11,27 @@ from app.models import User
 from app.schemas import AppCreate, AppUpdate, AppResponse, AppWithUser, AppWithVersions
 from app.utils.keycloak_auth import get_current_user_keycloak
 from app.utils.permissions import ensure_resource_access
+from app.utils.app_image import parse_image_data_url, build_image_data_url
 from app.crud import apps as crud_apps
 from app.services.git_service import git_service
+
+
+def _serialize_app(app):
+    """Replace ``app.image`` (bytes) with the data-URL form in-place.
+
+    The ORM model carries the raw bytes plus a separate mime column.
+    The Pydantic ``AppResponse`` schema declares ``image: Optional[str]``
+    and uses ``from_attributes=True``, so Pydantic reads ``app.image``
+    directly. Overwriting that attribute with the rebuilt data-URL
+    means the response serialiser sees a string and the wire format
+    matches the schema. Returns ``app`` so callers can chain.
+    """
+    if app is None:
+        return None
+    raw_bytes = getattr(app, "image", None)
+    if isinstance(raw_bytes, (bytes, memoryview, bytearray)):
+        app.image = build_image_data_url(bytes(raw_bytes), getattr(app, "image_mime", None))
+    return app
 
 router = APIRouter()
 
@@ -191,7 +210,7 @@ def list_apps(
     `ensure_resource_access`.
     """
     apps = crud_apps.get_apps(db, skip=skip, limit=limit, user_id=current_user.userId)
-    return apps
+    return [_serialize_app(a) for a in apps]
 
 
 # ----------------------------------------------------------------
@@ -203,19 +222,27 @@ def get_app(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user_keycloak)
 ):
-    """Get app by ID with available versions."""
-    app = crud_apps.get_app(db, app_id)
+    """Get app by ID with available versions.
+
+    Soft-deleted apps are still readable here so existing deployments
+    that still reference them can render their app name, git link,
+    etc. They just don't show up in the apps list / deploy wizard
+    (those use the default-filtered ``get_apps``).
+    """
+    app = crud_apps.get_app(db, app_id, include_deleted=True)
     if not app:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="App not found"
         )
-    
+
     # Check access permission
     ensure_resource_access(app.userId, current_user)
-    
-    # Fetch versions if git_link exists
-    if app.git_link:
+
+    # Fetch versions if git_link exists. Skipped for soft-deleted apps
+    # — listing versions is a "what could I deploy" affordance and the
+    # answer is "nothing", you already deleted this app.
+    if app.git_link and app.deleted_at is None:
         try:
             app.versions = git_service.get_versions(app.git_link)
         except Exception as e:
@@ -224,8 +251,8 @@ def get_app(
             logging.getLogger(__name__).warning(f"Could not fetch versions: {str(e)}")
     else:
         app.versions = []
-    
-    return app
+
+    return _serialize_app(app)
 
 
 # ----------------------------------------------------------------
@@ -323,6 +350,10 @@ def create_app(
     - **Git repository access is verified** before creating the app
     """
     logger = logging.getLogger(__name__)
+    # Decode the optional image data-URL up front so a malformed
+    # payload fails before we hit Keycloak / Git / DB.
+    image_bytes, image_mime = parse_image_data_url(app.image)
+
     # Verify repository access if git_link is provided
     if app.git_link:
         access_result = git_service.verify_repository_access(app.git_link)
@@ -332,8 +363,11 @@ def create_app(
                 detail=access_result['message']
             )
         logger.info(f"Repository access verified for {app.git_link}")
-    
-    return crud_apps.create_app(db, app, current_user.userId)
+
+    db_app = crud_apps.create_app(db, app, current_user.userId)
+    if image_bytes is not None:
+        db_app = crud_apps.set_app_image(db, db_app.appId, image_bytes, image_mime)
+    return _serialize_app(db_app)
 
 
 # ----------------------------------------------------------------
@@ -356,12 +390,24 @@ def update_app(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="App not found"
         )
-    
+
     # Check access permission
     ensure_resource_access(app.userId, current_user)
-    
+
+    # Image is set separately because the AppUpdate.image is a
+    # data-URL string and update_app excludes it from the bulk
+    # ``setattr`` loop. ``image=None`` means "leave unchanged"
+    # (Pydantic ``exclude_unset`` semantics) — to actively clear
+    # the image, send ``image=""``.
+    image_was_provided = "image" in app_update.model_fields_set
+    image_bytes, image_mime = (None, None)
+    if image_was_provided:
+        image_bytes, image_mime = parse_image_data_url(app_update.image)
+
     updated_app = crud_apps.update_app(db, app_id, app_update)
-    return updated_app
+    if image_was_provided:
+        updated_app = crud_apps.set_app_image(db, app_id, image_bytes, image_mime)
+    return _serialize_app(updated_app)
 
 
 # ----------------------------------------------------------------
@@ -373,9 +419,17 @@ def delete_app(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user_keycloak)
 ):
-    """
-    Delete an app
-    - **Owner or Teacher/Admin** can delete
+    """Soft-delete an app.
+
+    Sets ``apps.deleted_at`` instead of removing the row, so any
+    historical *or* still-running deployment that points at this app
+    keeps resolving (the detail page can still render the app name,
+    the running terraform state stays operational). The app simply
+    stops appearing in listings and the deploy wizard, so no new
+    deploys can be started against it. Existing deployments live on
+    until the user destroys them individually.
+
+    Owner/Teacher/Admin only (``ensure_resource_access``).
     """
     app = crud_apps.get_app(db, app_id)
     if not app:
@@ -383,11 +437,11 @@ def delete_app(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="App not found"
         )
-    
+
     # Check access permission
     ensure_resource_access(app.userId, current_user)
-    
-    success = crud_apps.delete_app(db, app_id)
+
+    success = crud_apps.soft_delete_app(db, app_id)
     if not success:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,

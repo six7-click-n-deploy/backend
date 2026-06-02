@@ -31,7 +31,23 @@ class Settings(BaseSettings):
     # credentials at rest and to seal the envelope shipped through Celery.
     # Generate: python -c 'from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())'
     CREDENTIAL_ENCRYPTION_KEY: str
-    
+
+    # SMTP (Gmail). Required for the post-deploy notification mails.
+    # Generate an "App password" in Google account settings (the regular
+    # password won't work with 2FA enabled). Leave SMTP_USER empty to
+    # disable mail sending — the notify hook turns into a no-op.
+    SMTP_HOST: str = "smtp.gmail.com"
+    SMTP_PORT: int = 587
+    SMTP_USER: str = ""
+    SMTP_PASSWORD: str = ""
+    SMTP_FROM_EMAIL: str = ""
+    SMTP_FROM_NAME: str = "Click-n-Deploy"
+
+    # Public URL the deployment detail page is reachable under, used in
+    # the owner-summary mail to deep-link back into the UI. No trailing
+    # slash. Falls back to the first CORS origin in dev.
+    APP_BASE_URL: str = "http://localhost:5173"
+
     class Config:
         env_file = ".env"
         case_sensitive = True

@@ -192,3 +192,37 @@ def ensure_deployment_access(deployment: Deployment, user: User, db: Session) ->
             detail="You don't have permission to access this deployment",
         )
 
+
+
+def is_deployment_owner_view(deployment: Deployment, user: User) -> bool:
+    """True if ``user`` should see the *owner view* of ``deployment``.
+
+    The owner view shows everything: tasks, logs, terraform state,
+    full team rosters, the destroy/delete button. The member view
+    (anything else with deployment access) only shows the deployment
+    metadata, the user's own team, and the resend-credentials button
+    for themself.
+
+    Teachers and admins always see the owner view — they're effectively
+    superusers across deployments. The deployment creator sees the
+    owner view of their own deployment. Everyone else who reaches
+    ``has_deployment_access`` (team members, direct UserToDeployment
+    mappings) gets the member view.
+    """
+    if user.role in (UserRole.TEACHER, UserRole.ADMIN):
+        return True
+    return str(deployment.userId) == str(user.userId)
+
+
+def ensure_deployment_owner_view(deployment: Deployment, user: User) -> None:
+    """Raise 403 unless ``user`` has the owner view of ``deployment``.
+
+    Use on endpoints that expose deployment-internals (tasks, logs,
+    state, destroy/delete) — members have read-access to the
+    deployment itself but not to those.
+    """
+    if not is_deployment_owner_view(deployment, user):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only the deployment owner or staff can perform this action",
+        )

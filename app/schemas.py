@@ -76,19 +76,32 @@ class AppBase(BaseModel):
     git_link: Optional[str] = None
 
 class AppCreate(AppBase):
-    pass
+    # Image is sent as a full data-URL string, e.g.
+    # ``"data:image/png;base64,iVBORw0KG..."``. The router decodes the
+    # base64 part to bytes and stores mime + bytes in two columns.
+    # Plain bytes would also work but data-URLs survive a round-trip
+    # through JSON cleanly (no Content-Type / multipart headache) and
+    # the same string can be set verbatim into ``<img :src=...>`` on
+    # the read path.
+    image: Optional[str] = None
 
 class AppUpdate(BaseModel):
     name: Optional[str] = None
     description: Optional[str] = None
     git_link: Optional[str] = None
-    image: Optional[bytes] = None
+    # Same data-URL convention as ``AppCreate``. Pass ``""`` (empty
+    # string) to explicitly clear the image; ``None`` (the default)
+    # leaves it unchanged.
+    image: Optional[str] = None
 
 class AppResponse(AppBase):
     appId: UUID
     userId: UUID
     created_at: datetime
-    
+    # Data-URL or null. Populated from ``app.image`` + ``app.image_mime``
+    # by ``serialize_app_image``; the raw bytes never leave the backend.
+    image: Optional[str] = None
+
     model_config = ConfigDict(from_attributes=True)
 
 class AppWithUser(AppResponse):
@@ -158,7 +171,12 @@ class TaskSummary(BaseModel):
     started_at: Optional[datetime] = None
     finished_at: Optional[datetime] = None
     created_at: datetime
-    
+    # Live-progress fields (mirror of Task model). Frontend renders the
+    # progress bar from these when reloading the page mid-deploy; the
+    # SSE stream supplies real-time updates while the page is open.
+    current_phase: Optional[str] = None
+    progress_pct: Optional[int] = None
+
     model_config = ConfigDict(from_attributes=True)
 
 
@@ -193,6 +211,8 @@ class TaskBase(BaseModel):
     logs: Optional[str] = None
     tf_state: Optional[str] = None
     outputs: Optional[str] = None
+    current_phase: Optional[str] = None
+    progress_pct: Optional[int] = None
 
 class TaskCreate(TaskBase):
     pass
@@ -204,6 +224,8 @@ class TaskUpdate(BaseModel):
     logs: Optional[str] = None
     tf_state: Optional[str] = None
     outputs: Optional[str] = None
+    current_phase: Optional[str] = None
+    progress_pct: Optional[int] = None
 
 class TaskResponse(TaskBase):
     taskId: UUID

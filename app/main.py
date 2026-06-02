@@ -10,6 +10,7 @@ from app.routers import auth_keycloak, users, courses, apps, deployments, teams,
 from app.config import settings
 from app.services.celery_event_listener import start_event_listener
 from app.services.reconciler import run_reconciler
+from app.services.deployment_pubsub import pubsub
 
 logger = logging.getLogger(__name__)
 
@@ -21,6 +22,13 @@ async def lifespan(app: FastAPI):
     # Startup
     logger.info("=== Application Starting ===")
     logger.info("ℹ️  Use 'alembic upgrade head' to apply database migrations")
+
+    # Bind the FastAPI event loop to the deployment pubsub *before*
+    # spawning the Celery listener. The listener thread pushes into
+    # the pubsub from a non-asyncio thread; without a loop reference
+    # those pushes would be silently dropped.
+    pubsub.set_loop(asyncio.get_running_loop())
+    logger.info("✓ Deployment pubsub bound to event loop")
 
     # Start Celery event listener in background thread
     listener_thread = threading.Thread(target=start_event_listener, daemon=True)

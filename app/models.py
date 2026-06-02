@@ -1,4 +1,4 @@
-from sqlalchemy import Column, String, DateTime, ForeignKey, Text, Enum, LargeBinary
+from sqlalchemy import Column, String, DateTime, ForeignKey, Text, Enum, LargeBinary, Integer
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import relationship
 from datetime import datetime
@@ -79,15 +79,22 @@ class User(Base):
 # ----------------------------------------------------------------
 class App(Base):
     __tablename__ = "apps"
-    
+
     appId = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     name = Column(String, nullable=False)
     description = Column(String, nullable=True)
-    image = Column(LargeBinary, nullable=True)  # base64 als Binary speichern
+    image = Column(LargeBinary, nullable=True)  # raw bytes of the uploaded logo
+    image_mime = Column(String(64), nullable=True)  # e.g. "image/png" — needed to build a data-URL on read
     git_link = Column(String, nullable=True)
     userId = Column(UUID(as_uuid=True), ForeignKey("users.userId"), nullable=False, index=True)
     created_at = Column(DateTime, default=datetime.utcnow)
-    
+    # Soft-delete marker. When set, the app is hidden from default
+    # queries (apps list, deploy wizard) but the row stays so existing
+    # deployments referencing this app keep their FK valid and the
+    # audit trail survives. The router refuses to soft-delete an app
+    # while it has live deployments to avoid orphan resources.
+    deleted_at = Column(DateTime, nullable=True)
+
     # Relationships
     user = relationship("User", back_populates="apps")
     deployments = relationship("Deployment", back_populates="app")
@@ -97,13 +104,20 @@ class App(Base):
 # ----------------------------------------------------------------
 class Deployment(Base):
     __tablename__ = "deployments"
-    
+
     deploymentId = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     name = Column(String, nullable=False)
     releaseTag = Column(String, nullable=True)
     userInputVar = Column(Text, nullable=True)  # könnte auch JSON sein
     userId = Column(UUID(as_uuid=True), ForeignKey("users.userId"), nullable=False, index=True)
     appId = Column(UUID(as_uuid=True), ForeignKey("apps.appId"), nullable=False, index=True)
+    # Soft-delete marker. Set to ``utcnow()`` to hide the deployment
+    # from default queries while keeping the row for audit/restore.
+    # See lifecycle.py — DELETE is only allowed in terminal states, so
+    # by the time this is set the OpenStack resources are already gone
+    # (or never existed). The index on (deleted_at IS NULL) keeps the
+    # default list query cheap.
+    deleted_at = Column(DateTime, nullable=True)
 
     # Relationships
     user = relationship("User", back_populates="deployments")
@@ -143,6 +157,13 @@ class Task(Base):
     logs = Column(Text, nullable=True)  # JSON oder Text
     tf_state = Column(Text, nullable=True)  # Terraform State als JSON/Text
     outputs = Column(Text, nullable=True)  # Terraform Outputs als JSON/Text
+    # Live-progress columns. Updated by the celery event listener whenever
+    # the worker emits a `task-progress` event. They are advisory — the
+    # canonical source of "what is happening right now" is the SSE stream;
+    # these columns let users who reload the page see the last known
+    # phase/percent without waiting for the next event.
+    current_phase = Column(String(50), nullable=True)
+    progress_pct = Column(Integer, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
 
     # Relationships

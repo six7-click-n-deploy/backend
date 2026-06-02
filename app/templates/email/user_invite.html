@@ -1,0 +1,68 @@
+{% extends "base.html" %}
+{% block title %}Your access for {{ deployment.name }}{% endblock %}
+{% block content %}
+<h1>Your access details</h1>
+
+<p>Hi <strong>{{ user_display_name }}</strong>,</p>
+
+<p>
+  Your deployment <strong>{{ deployment.name }}</strong>
+  ({{ deployment.app_name }}) is up and running. Here are your personal
+  access details — please don't share them with anyone outside your team.
+</p>
+
+<table class="card" role="presentation" cellpadding="0" cellspacing="0">
+  <tr>
+    <th colspan="2">Access</th>
+  </tr>
+  {% if access.url %}
+  <tr>
+    <td>URL</td>
+    <td><a href="{{ access.url }}">{{ access.url }}</a></td>
+  </tr>
+  {% endif %}
+  {% if access.ip %}
+  <tr>
+    <td>IP</td>
+    <td><code>{{ access.ip }}</code>{% if access.port %}:<code>{{ access.port }}</code>{% endif %}</td>
+  </tr>
+  {% endif %}
+  <tr>
+    <td>Username</td>
+    <td><code>{{ access.username }}</code></td>
+  </tr>
+  <tr>
+    <td>Password</td>
+    <td><code>{{ access.password }}</code></td>
+  </tr>
+  {% if access.auth_type and access.auth_type != "password" %}
+  <tr>
+    <td>Auth type</td>
+    <td>{{ access.auth_type }}</td>
+  </tr>
+  {% endif %}
+</table>
+
+{% if teammates %}
+<h2>Your team — {{ team_name }}</h2>
+<p>You're sharing this deployment with:</p>
+<table class="list" role="presentation" cellpadding="0" cellspacing="0">
+  <tr>
+    <th>Name</th>
+    <th>Email</th>
+  </tr>
+  {% for mate in teammates %}
+  <tr>
+    <td>{{ mate.display_name }}</td>
+    <td><a href="mailto:{{ mate.user.email }}">{{ mate.user.email }}</a></td>
+  </tr>
+  {% endfor %}
+</table>
+{% endif %}
+
+<p class="muted">
+  Deployed from <code>{{ deployment.git_url }}</code> at tag
+  <code>{{ deployment.release_tag }}</code>.
+  Your login username is <code>{{ user.username }}</code>.
+</p>
+{% endblock %}
