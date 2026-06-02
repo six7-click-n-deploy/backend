@@ -37,7 +37,6 @@ from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.crud import deployments as crud_deployments
-from app.crud import users as crud_users
 from app.models import App, Deployment, Task, TaskStatus, TaskType, Team, User
 from app.services import email_service
 

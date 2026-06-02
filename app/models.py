@@ -1,10 +1,13 @@
-from sqlalchemy import Column, String, DateTime, ForeignKey, Text, Enum, LargeBinary, Integer
-from sqlalchemy.dialects.postgresql import UUID
-from sqlalchemy.orm import relationship
-from datetime import datetime
-from app.database import Base
 import enum
 import uuid
+from datetime import datetime
+
+from sqlalchemy import Column, DateTime, Enum, ForeignKey, Integer, LargeBinary, String, Text
+from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.orm import relationship
+
+from app.database import Base
+
 
 # ----------------------------------------------------------------
 # ENUMS
@@ -14,12 +17,14 @@ class UserRole(str, enum.Enum):
     TEACHER = "teacher"
     ADMIN = "admin"
 
+
 class TaskType(str, enum.Enum):
     DEPLOY = "deploy"
     UPDATE = "update"
     DESTROY = "destroy"
     PAUSE = "pause"
     RESUME = "resume"
+
 
 class TaskStatus(str, enum.Enum):
     PENDING = "pending"
@@ -28,28 +33,31 @@ class TaskStatus(str, enum.Enum):
     FAILED = "failed"
     CANCELLED = "cancelled"
 
+
 class OpenStackAuthType(str, enum.Enum):
     APPLICATION_CREDENTIAL = "v3applicationcredential"
     PASSWORD = "password"
+
 
 # ----------------------------------------------------------------
 # COURSE MODEL
 # ----------------------------------------------------------------
 class Course(Base):
     __tablename__ = "courses"
-    
+
     courseId = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     name = Column(String, nullable=False)
-    
+
     # Relationships
     users = relationship("User", back_populates="course")
+
 
 # ----------------------------------------------------------------
 # USER MODEL
 # ----------------------------------------------------------------
 class User(Base):
     __tablename__ = "users"
-    
+
     userId = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     keycloak_id = Column(String, unique=True, index=True, nullable=True)  # Keycloak User ID (sub)
     email = Column(String, unique=True, index=True, nullable=False)
@@ -59,7 +67,7 @@ class User(Base):
     role = Column(Enum(UserRole), nullable=False, default=UserRole.STUDENT)
     courseId = Column(UUID(as_uuid=True), ForeignKey("courses.courseId"), nullable=True, index=True)
     created_at = Column(DateTime, default=datetime.utcnow)
-    
+
     # Relationships
     course = relationship("Course", back_populates="users")
     apps = relationship("App", back_populates="user")
@@ -73,6 +81,7 @@ class User(Base):
         cascade="all, delete-orphan",
         passive_deletes=True,
     )
+
 
 # ----------------------------------------------------------------
 # APP MODEL
@@ -98,6 +107,7 @@ class App(Base):
     # Relationships
     user = relationship("User", back_populates="apps")
     deployments = relationship("Deployment", back_populates="app")
+
 
 # ----------------------------------------------------------------
 # DEPLOYMENT MODEL
@@ -141,6 +151,7 @@ class Deployment(Base):
         passive_deletes=True,
     )
 
+
 # ----------------------------------------------------------------
 # TASK MODEL
 # ----------------------------------------------------------------
@@ -148,7 +159,12 @@ class Task(Base):
     __tablename__ = "tasks"
 
     taskId = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    deploymentId = Column(UUID(as_uuid=True), ForeignKey("deployments.deploymentId", ondelete="CASCADE"), nullable=False, index=True)
+    deploymentId = Column(
+        UUID(as_uuid=True),
+        ForeignKey("deployments.deploymentId", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
     celeryTaskId = Column(String, nullable=True)
     type = Column(Enum(TaskType), nullable=False)
     status = Column(Enum(TaskStatus), default=TaskStatus.PENDING)
@@ -168,30 +184,47 @@ class Task(Base):
 
     # Relationships
     deployment = relationship("Deployment", back_populates="tasks")
-    
+
+
 # ----------------------------------------------------------------
 # USERTODEPLOYMENT MODEL
 # ----------------------------------------------------------------
 class UserToDeployment(Base):
     __tablename__ = "user_to_deployments"
-    
+
     userToDeploymentId = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    userId = Column(UUID(as_uuid=True), ForeignKey("users.userId", ondelete="CASCADE"), nullable=False, index=True)
-    deploymentId = Column(UUID(as_uuid=True), ForeignKey("deployments.deploymentId", ondelete="CASCADE"), nullable=False, index=True)
-    
+    userId = Column(
+        UUID(as_uuid=True),
+        ForeignKey("users.userId", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    deploymentId = Column(
+        UUID(as_uuid=True),
+        ForeignKey("deployments.deploymentId", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+
     # Relationships
     user = relationship("User", back_populates="user_to_deployments")
     deployment = relationship("Deployment", back_populates="user_to_deployments")
+
 
 # ----------------------------------------------------------------
 # TEAM MODEL
 # ----------------------------------------------------------------
 class Team(Base):
     __tablename__ = "teams"
-    
+
     teamId = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     name = Column(String, nullable=False)
-    deploymentId = Column(UUID(as_uuid=True), ForeignKey("deployments.deploymentId", ondelete="CASCADE"), nullable=False, index=True)
+    deploymentId = Column(
+        UUID(as_uuid=True),
+        ForeignKey("deployments.deploymentId", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
 
     # Relationships
     deployment = relationship("Deployment", back_populates="teams")
@@ -202,6 +235,7 @@ class Team(Base):
         passive_deletes=True,
     )
 
+
 # ----------------------------------------------------------------
 # USERTOTEAM MODEL
 # ----------------------------------------------------------------
@@ -209,8 +243,18 @@ class UserToTeam(Base):
     __tablename__ = "user_to_teams"
 
     userToTeamId = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    userId = Column(UUID(as_uuid=True), ForeignKey("users.userId", ondelete="CASCADE"), nullable=False, index=True)
-    teamId = Column(UUID(as_uuid=True), ForeignKey("teams.teamId", ondelete="CASCADE"), nullable=False, index=True)
+    userId = Column(
+        UUID(as_uuid=True),
+        ForeignKey("users.userId", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    teamId = Column(
+        UUID(as_uuid=True),
+        ForeignKey("teams.teamId", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
 
     # Relationships
     user = relationship("User", back_populates="user_to_teams")
@@ -260,4 +304,3 @@ class UserOpenStackCredential(Base):
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
     user = relationship("User", back_populates="openstack_credential")
-

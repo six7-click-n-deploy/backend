@@ -16,22 +16,23 @@ teachers, and admins can fetch them. Members get a 403 here even though they
 can read the deployment metadata via ``GET /deployments/{id}``.
 """
 
-from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy.orm import Session
-from typing import List
 from uuid import UUID
 
+from fastapi import APIRouter, Depends, HTTPException, status
+from sqlalchemy.orm import Session
+
+from app.crud import deployments as crud_deployments
+from app.crud import tasks as crud_tasks
 from app.database import get_db
 from app.models import User
 from app.schemas import TaskResponse
 from app.utils.keycloak_auth import get_current_user_keycloak
 from app.utils.permissions import ensure_deployment_access, ensure_deployment_owner_view
-from app.crud import tasks as crud_tasks, deployments as crud_deployments
 
 router = APIRouter()
 
 
-@router.get("/deployment/{deployment_id}", response_model=List[TaskResponse])
+@router.get("/deployment/{deployment_id}", response_model=list[TaskResponse])
 def get_deployment_tasks(
     deployment_id: UUID,
     db: Session = Depends(get_db),

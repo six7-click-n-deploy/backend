@@ -19,7 +19,6 @@ from __future__ import annotations
 
 import base64
 import re
-from typing import Optional
 
 from fastapi import HTTPException, status
 
@@ -38,7 +37,7 @@ _DATA_URL_RE = re.compile(
 )
 
 
-def parse_image_data_url(data_url: Optional[str]) -> tuple[Optional[bytes], Optional[str]]:
+def parse_image_data_url(data_url: str | None) -> tuple[bytes | None, str | None]:
     """Decode a data-URL into ``(bytes, mime)``.
 
     Returns ``(None, None)`` for ``None`` or empty string — the empty
@@ -80,7 +79,7 @@ def parse_image_data_url(data_url: Optional[str]) -> tuple[Optional[bytes], Opti
     return payload, mime
 
 
-def build_image_data_url(image_bytes: Optional[bytes], image_mime: Optional[str]) -> Optional[str]:
+def build_image_data_url(image_bytes: bytes | None, image_mime: str | None) -> str | None:
     """Build a data-URL for the API response.
 
     Returns ``None`` if either side is missing — that's the empty

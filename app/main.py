@@ -1,16 +1,27 @@
-from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
-from contextlib import asynccontextmanager
 import asyncio
 import logging
 import threading
+from contextlib import asynccontextmanager
 
-from app.database import engine, Base
-from app.routers import auth_keycloak, users, courses, apps, deployments, teams, tasks, quotas, openstack_credentials
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+
 from app.config import settings
+from app.routers import (
+    apps,
+    auth_keycloak,
+    courses,
+    dashboard,
+    deployments,
+    openstack_credentials,
+    quotas,
+    tasks,
+    teams,
+    users,
+)
 from app.services.celery_event_listener import start_event_listener
-from app.services.reconciler import run_reconciler
 from app.services.deployment_pubsub import pubsub
+from app.services.reconciler import run_reconciler
 
 logger = logging.getLogger(__name__)
 
@@ -57,6 +68,7 @@ async def lifespan(app: FastAPI):
             logger.exception("Reconciler task raised on shutdown")
         logger.info("✓ Shutdown complete")
 
+
 # ----------------------------------------------------------------
 # FASTAPI APP
 # ----------------------------------------------------------------
@@ -89,7 +101,9 @@ app.include_router(deployments.router, prefix="/deployments", tags=["Deployments
 app.include_router(tasks.router, prefix="/tasks", tags=["Tasks"])
 app.include_router(teams.router, prefix="/teams", tags=["Teams"])
 app.include_router(quotas.router, prefix="/quotas", tags=["Quotas"])
+app.include_router(dashboard.router, prefix="/dashboard", tags=["Dashboard"])
 app.include_router(openstack_credentials.router, tags=["OpenStack Credentials"])
+
 
 # ----------------------------------------------------------------
 # HEALTH CHECK

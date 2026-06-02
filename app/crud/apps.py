@@ -1,7 +1,7 @@
-from sqlalchemy.orm import Session
-from typing import List, Optional
-from uuid import UUID
 from datetime import datetime
+from uuid import UUID
+
+from sqlalchemy.orm import Session
 
 from app.models import App
 from app.schemas import AppCreate, AppUpdate
@@ -11,7 +11,7 @@ def get_app(
     db: Session,
     app_id: UUID,
     include_deleted: bool = False,
-) -> Optional[App]:
+) -> App | None:
     """Get app by ID. Hides soft-deleted apps by default.
 
     ``include_deleted=True`` is reserved for the rare audit lookup —
@@ -27,9 +27,9 @@ def get_apps(
     db: Session,
     skip: int = 0,
     limit: int = 100,
-    user_id: Optional[UUID] = None,
+    user_id: UUID | None = None,
     include_deleted: bool = False,
-) -> List[App]:
+) -> list[App]:
     """Get apps with optional user filter. Hides soft-deleted by default."""
     query = db.query(App)
 
@@ -61,7 +61,7 @@ def create_app(db: Session, app: AppCreate, user_id: UUID) -> App:
     return db_app
 
 
-def update_app(db: Session, app_id: UUID, app_update: AppUpdate) -> Optional[App]:
+def update_app(db: Session, app_id: UUID, app_update: AppUpdate) -> App | None:
     """Update app information.
 
     The ``image`` field is intentionally NOT applied here — the router
@@ -85,9 +85,9 @@ def update_app(db: Session, app_id: UUID, app_update: AppUpdate) -> Optional[App
 def set_app_image(
     db: Session,
     app_id: UUID,
-    image_bytes: Optional[bytes],
-    image_mime: Optional[str],
-) -> Optional[App]:
+    image_bytes: bytes | None,
+    image_mime: str | None,
+) -> App | None:
     """Persist the image bytes + mime atomically.
 
     Both args ``None`` clears the image. Otherwise both must be set —

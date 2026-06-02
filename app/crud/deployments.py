@@ -1,19 +1,21 @@
-from sqlalchemy.orm import Session, joinedload
-from sqlalchemy import desc, exists
-from typing import List, Optional, Set, Dict, Any
-from uuid import UUID
 import json
+from datetime import datetime
+from typing import Any
+from uuid import UUID
 
-from app.models import Deployment, UserToDeployment, Task, TaskType, TaskStatus, Team, User
+from sqlalchemy import desc, exists
+from sqlalchemy.orm import Session, joinedload
+
+from app.models import Deployment, Task, TaskStatus, TaskType, Team, User, UserToDeployment
 from app.schemas import DeploymentCreate
 
 
 def _is_destroyed_subq():
     """Correlated EXISTS: deployment has a successful DESTROY task."""
     return exists().where(
-        (Task.deploymentId == Deployment.deploymentId) &
-        (Task.type == TaskType.DESTROY) &
-        (Task.status == TaskStatus.SUCCESS)
+        (Task.deploymentId == Deployment.deploymentId)
+        & (Task.type == TaskType.DESTROY)
+        & (Task.status == TaskStatus.SUCCESS)
     )
 
 
@@ -21,18 +23,18 @@ def count_active_user_deployments(db: Session, user_id: UUID) -> int:
     """Number of non-destroyed deployments owned by user."""
     return (
         db.query(Deployment)
-          .filter(Deployment.userId == user_id)
-          .filter(~_is_destroyed_subq())
-          .count()
+        .filter(Deployment.userId == user_id)
+        .filter(~_is_destroyed_subq())
+        .count()
     )
 
 
 def has_active_user_deployment(db: Session, user_id: UUID) -> bool:
     return (
         db.query(Deployment.deploymentId)
-          .filter(Deployment.userId == user_id)
-          .filter(~_is_destroyed_subq())
-          .first() is not None
+        .filter(Deployment.userId == user_id)
+        .filter(~_is_destroyed_subq())
+        .first() is not None
     )
 
 
@@ -40,7 +42,7 @@ def get_deployment(
     db: Session,
     deployment_id: UUID,
     include_deleted: bool = False,
-) -> Optional[Deployment]:
+) -> Deployment | None:
     """Get deployment by ID. Hides soft-deleted rows by default.
 
     ``include_deleted=True`` is for the rare audit/restore lookup; the
@@ -56,7 +58,7 @@ def get_deployment_with_details(
     db: Session,
     deployment_id: UUID,
     include_deleted: bool = False,
-) -> Optional[Deployment]:
+) -> Deployment | None:
     """Get deployment by ID with all relations loaded. Hides soft-deleted by default."""
     q = (
         db.query(Deployment)
@@ -72,7 +74,7 @@ def get_deployment_with_details(
     return q.first()
 
 
-def get_latest_task(db: Session, deployment_id: UUID) -> Optional[Task]:
+def get_latest_task(db: Session, deployment_id: UUID) -> Task | None:
     """Get the most recent task for a deployment"""
     return (
         db.query(Task)
@@ -82,7 +84,7 @@ def get_latest_task(db: Session, deployment_id: UUID) -> Optional[Task]:
     )
 
 
-def get_first_task(db: Session, deployment_id: UUID) -> Optional[Task]:
+def get_first_task(db: Session, deployment_id: UUID) -> Task | None:
     """Get the first task for a deployment (when deployment was created)"""
     from sqlalchemy import asc
     return (
@@ -93,7 +95,7 @@ def get_first_task(db: Session, deployment_id: UUID) -> Optional[Task]:
     )
 
 
-def get_deployment_status(db: Session, deployment_id: UUID) -> Optional[str]:
+def get_deployment_status(db: Session, deployment_id: UUID) -> str | None:
     """Effective deployment status, derived from the latest task.
 
     The bare ``task.status`` (pending/running/success/failed/cancelled) is
@@ -127,7 +129,7 @@ def get_deployment_created_at(db: Session, deployment_id: UUID):
     return task.created_at if task else None
 
 
-def get_team_members(db: Session, team_id: UUID) -> List[User]:
+def get_team_members(db: Session, team_id: UUID) -> list[User]:
     """Get all users in a team"""
     from app.models import UserToTeam
     user_ids = (
@@ -136,17 +138,17 @@ def get_team_members(db: Session, team_id: UUID) -> List[User]:
         .all()
     )
     user_ids = [uid[0] for uid in user_ids]
-    
+
     if not user_ids:
         return []
-    
+
     return db.query(User).filter(User.userId.in_(user_ids)).all()
 
 
-def get_deployment_teams_with_members(db: Session, deployment_id: UUID) -> List[Dict[str, Any]]:
+def get_deployment_teams_with_members(db: Session, deployment_id: UUID) -> list[dict[str, Any]]:
     """Get all teams for a deployment with their members"""
     teams = db.query(Team).filter(Team.deploymentId == deployment_id).all()
-    
+
     result = []
     for team in teams:
         members = get_team_members(db, team.teamId)
@@ -162,11 +164,11 @@ def get_deployment_teams_with_members(db: Session, deployment_id: UUID) -> List[
                 for member in members
             ]
         })
-    
+
     return result
 
 
-def get_deployment_outputs(db: Session, deployment_id: UUID) -> Optional[Dict[str, Any]]:
+def get_deployment_outputs(db: Session, deployment_id: UUID) -> dict[str, Any] | None:
     """Get parsed Terraform outputs from the latest successful task"""
     task = (
         db.query(Task)
@@ -175,7 +177,7 @@ def get_deployment_outputs(db: Session, deployment_id: UUID) -> Optional[Dict[st
         .order_by(desc(Task.created_at))
         .first()
     )
-    
+
     if task and task.outputs:
         try:
             return json.loads(task.outputs)
@@ -188,12 +190,12 @@ def get_deployments(
     db: Session,
     skip: int = 0,
     limit: int = 100,
-    user_id: Optional[UUID] = None,
-    member_user_id: Optional[UUID] = None,
-    app_id: Optional[UUID] = None,
-    status: Optional[str] = None,
+    user_id: UUID | None = None,
+    member_user_id: UUID | None = None,
+    app_id: UUID | None = None,
+    status: str | None = None,
     include_deleted: bool = False,
-) -> List[Deployment]:
+) -> list[Deployment]:
     """Get deployments with optional filters. Hides soft-deleted by default.
 
     ``user_id`` filters by deployment owner (``Deployment.userId``).
@@ -254,7 +256,7 @@ def get_deployments(
     return deployments
 
 
-def get_deployments_with_status(db: Session, deployments: List[Deployment]) -> List[Dict[str, Any]]:
+def get_deployments_with_status(db: Session, deployments: list[Deployment]) -> list[dict[str, Any]]:
     """Enrich deployments with their current status from latest task"""
     result = []
     for deployment in deployments:
@@ -302,8 +304,6 @@ def soft_delete_deployment(db: Session, deployment_id: UUID) -> bool:
     Returns ``False`` if the deployment doesn't exist (or was already
     deleted), ``True`` on a successful soft-delete.
     """
-    from datetime import datetime
-
     db_deployment = get_deployment(db, deployment_id)
     if not db_deployment:
         return False
@@ -321,13 +321,13 @@ delete_deployment = soft_delete_deployment
 def create_user_to_deployments(
     db: Session,
     deployment_id: UUID,
-    user_ids: Set[UUID]
-) -> List[UserToDeployment]:
+    user_ids: set[UUID],
+) -> list[UserToDeployment]:
     """
     Create UserToDeployment entries for multiple users
     """
     user_to_deployments = []
-    
+
     for user_id in user_ids:
         user_to_deployment = UserToDeployment(
             userId=user_id,
@@ -335,5 +335,5 @@ def create_user_to_deployments(
         )
         db.add(user_to_deployment)
         user_to_deployments.append(user_to_deployment)
-    
+
     return user_to_deployments

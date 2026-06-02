@@ -1,14 +1,14 @@
-from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy.orm import Session
-from typing import List, Optional
 from uuid import UUID
 
+from fastapi import APIRouter, Depends, HTTPException, status
+from sqlalchemy.orm import Session
+
+from app.crud import teams as crud_teams
 from app.database import get_db
 from app.models import User
-from app.schemas import TeamCreate, TeamUpdate, TeamResponse, TeamWithMembers
+from app.schemas import TeamCreate, TeamResponse, TeamUpdate, TeamWithMembers
 from app.utils.keycloak_auth import get_current_user_keycloak
 from app.utils.permissions import get_current_teacher_or_admin
-from app.crud import teams as crud_teams
 
 router = APIRouter()
 
@@ -16,11 +16,11 @@ router = APIRouter()
 # ----------------------------------------------------------------
 # GET ALL TEAMS
 # ----------------------------------------------------------------
-@router.get("/", response_model=List[TeamResponse])
+@router.get("/", response_model=list[TeamResponse])
 def list_teams(
     skip: int = 0,
     limit: int = 100,
-    user_group_id: Optional[UUID] = None,
+    user_group_id: UUID | None = None,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user_keycloak)
 ):

@@ -1,12 +1,12 @@
+
 from pydantic_settings import BaseSettings
-from typing import List
 
 
 class Settings(BaseSettings):
     # App
     APP_NAME: str = "Backend API"
     DEBUG: bool = False
-    
+
     # Database
     DATABASE_URL: str
 
@@ -25,7 +25,7 @@ class Settings(BaseSettings):
     KEYCLOAK_CLIENT_SECRET: str = ""  # Set via environment variable
 
     # CORS
-    CORS_ORIGINS: List[str] = ["http://localhost:3000", "http://localhost:5173"]
+    CORS_ORIGINS: list[str] = ["http://localhost:3000", "http://localhost:5173"]
 
     # Symmetric Fernet key shared with the worker. Used to encrypt OpenStack
     # credentials at rest and to seal the envelope shipped through Celery.
