@@ -155,6 +155,21 @@ def sync_user_from_keycloak(db: Session, keycloak_user_data: dict) -> User:
         return user
 
     updated = False
+    # Email is the only identifier our app trusts (Keycloak's
+    # ``sub``/``id`` is a UUID we use as the foreign key, but every
+    # display, search, and notification uses ``email``). When the
+    # Keycloak record changes — user updated their address, admin
+    # corrected a typo — we have to follow.
+    if email and user.email != email:
+        user.email = email
+        updated = True
+    # Same story for username: it's the login identifier shown in
+    # both the UI and the Terraform-issued credentials. The fallback
+    # in ``sync_user_from_keycloak`` makes ``username`` always a
+    # non-empty string, so we don't need a truthy guard.
+    if username and user.username != username:
+        user.username = username
+        updated = True
     if user.role != app_role:
         user.role = app_role
         updated = True

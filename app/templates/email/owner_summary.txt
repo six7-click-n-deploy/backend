@@ -1,0 +1,31 @@
+Deployment summary — {{ deployment.name }}
+{{ "=" * (deployment.name|length + 22) }}
+
+Hi {{ owner_display_name }},
+
+Your deployment "{{ deployment.name }}" ({{ deployment.app_name }}) finished
+successfully. Below is the full overview of every team and the credentials
+issued to each user. Each user has also received their own access mail;
+this copy is for your records.
+
+Open in Click-n-Deploy: {{ detail_url }}
+{% for team in teams %}
+TEAM — {{ team.name }}
+{{ "-" * (team.name|length + 7) }}
+{% if team.vm -%}
+{% if team.vm.url %}URL:           {{ team.vm.url }}
+{% endif -%}
+{% if team.vm.floating_ip %}Floating IP:   {{ team.vm.floating_ip }}
+{% endif -%}
+{% if team.vm.fixed_ip %}Fixed IP:      {{ team.vm.fixed_ip }}
+{% endif -%}
+{% if team.vm.instance_name %}Instance:      {{ team.vm.instance_name }}
+{% endif -%}
+{% endif -%}
+Members:
+{% for member in team.members %}  - {{ member.display_name }} <{{ member.user.email }}>
+      login:    {{ member.access.username }}
+      password: {{ member.access.password }}
+{% endfor %}
+{% endfor %}
+Deployed from {{ deployment.git_url }} at tag {{ deployment.release_tag }}.
