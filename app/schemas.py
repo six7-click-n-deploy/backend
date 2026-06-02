@@ -91,20 +91,33 @@ class AppBase(BaseModel):
 
 
 class AppCreate(AppBase):
-    pass
+    # Image is sent as a full data-URL string, e.g.
+    # ``"data:image/png;base64,iVBORw0KG..."``. The router decodes the
+    # base64 part to bytes and stores mime + bytes in two columns.
+    # Plain bytes would also work but data-URLs survive a round-trip
+    # through JSON cleanly (no Content-Type / multipart headache) and
+    # the same string can be set verbatim into ``<img :src=...>`` on
+    # the read path.
+    image: str | None = None
 
 
 class AppUpdate(BaseModel):
     name: str | None = None
     description: str | None = None
     git_link: str | None = None
-    image: bytes | None = None
+    # Same data-URL convention as ``AppCreate``. Pass ``""`` (empty
+    # string) to explicitly clear the image; ``None`` (the default)
+    # leaves it unchanged.
+    image: str | None = None
 
 
 class AppResponse(AppBase):
     appId: UUID
     userId: UUID
     created_at: datetime
+    # Data-URL or null. Populated from ``app.image`` + ``app.image_mime``
+    # by ``serialize_app_image``; the raw bytes never leave the backend.
+    image: str | None = None
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -183,6 +196,11 @@ class TaskSummary(BaseModel):
     started_at: datetime | None = None
     finished_at: datetime | None = None
     created_at: datetime
+    # Live-progress fields (mirror of Task model). Frontend renders the
+    # progress bar from these when reloading the page mid-deploy; the
+    # SSE stream supplies real-time updates while the page is open.
+    current_phase: str | None = None
+    progress_pct: int | None = None
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -219,7 +237,8 @@ class TaskBase(BaseModel):
     logs: str | None = None
     tf_state: str | None = None
     outputs: str | None = None
-
+    current_phase: str | None = None
+    progress_pct: int | None = None
 
 class TaskCreate(TaskBase):
     pass
@@ -232,7 +251,8 @@ class TaskUpdate(BaseModel):
     logs: str | None = None
     tf_state: str | None = None
     outputs: str | None = None
-
+    current_phase: str | None = None
+    progress_pct: int | None = None
 
 class TaskResponse(TaskBase):
     taskId: UUID

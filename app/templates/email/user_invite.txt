@@ -1,0 +1,28 @@
+Your access for {{ deployment.name }}
+{{ "=" * (deployment.name|length + 16) }}
+
+Hi {{ user_display_name }},
+
+Your deployment "{{ deployment.name }}" ({{ deployment.app_name }}) is
+up and running. Here are your personal access details — please don't
+share them with anyone outside your team.
+
+ACCESS
+------
+{% if access.url %}URL:       {{ access.url }}
+{% endif -%}
+{% if access.ip %}IP:        {{ access.ip }}{% if access.port %}:{{ access.port }}{% endif %}
+{% endif -%}
+Username:  {{ access.username }}
+Password:  {{ access.password }}
+{% if access.auth_type and access.auth_type != "password" %}Auth type: {{ access.auth_type }}
+{% endif -%}
+{% if teammates %}
+TEAM — {{ team_name }}
+{{ "-" * (team_name|length + 7) }}
+You're sharing this deployment with:
+{% for mate in teammates %}  - {{ mate.display_name }} <{{ mate.user.email }}>
+{% endfor -%}
+{% endif %}
+Deployed from {{ deployment.git_url }} at tag {{ deployment.release_tag }}.
+Your login username is {{ user.username }}.

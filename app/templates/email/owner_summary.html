@@ -1,0 +1,78 @@
+{% extends "base.html" %}
+{% block title %}Deployment summary — {{ deployment.name }}{% endblock %}
+{% block content %}
+<h1>Deployment summary</h1>
+
+<p>Hi <strong>{{ owner_display_name }}</strong>,</p>
+
+<p>
+  Your deployment <strong>{{ deployment.name }}</strong>
+  ({{ deployment.app_name }}) finished successfully.
+  Below is the full overview of every team and the credentials issued
+  to each user. Each user has also received their own access mail; this
+  copy is for your records.
+</p>
+
+<p>
+  <a class="button" href="{{ detail_url }}">Open in Click-n-Deploy</a>
+</p>
+
+{% for team in teams %}
+<h2>Team — {{ team.name }}</h2>
+
+{% if team.vm %}
+<table class="card" role="presentation" cellpadding="0" cellspacing="0">
+  <tr>
+    <th colspan="2">VM</th>
+  </tr>
+  {% if team.vm.url %}
+  <tr>
+    <td>URL</td>
+    <td><a href="{{ team.vm.url }}">{{ team.vm.url }}</a></td>
+  </tr>
+  {% endif %}
+  {% if team.vm.floating_ip %}
+  <tr>
+    <td>Floating IP</td>
+    <td><code>{{ team.vm.floating_ip }}</code></td>
+  </tr>
+  {% endif %}
+  {% if team.vm.fixed_ip %}
+  <tr>
+    <td>Fixed IP</td>
+    <td><code>{{ team.vm.fixed_ip }}</code></td>
+  </tr>
+  {% endif %}
+  {% if team.vm.instance_name %}
+  <tr>
+    <td>Instance</td>
+    <td><code>{{ team.vm.instance_name }}</code></td>
+  </tr>
+  {% endif %}
+</table>
+{% endif %}
+
+<h3>Members</h3>
+<table class="list" role="presentation" cellpadding="0" cellspacing="0">
+  <tr>
+    <th>Name</th>
+    <th>Email</th>
+    <th>Login</th>
+    <th>Password</th>
+  </tr>
+  {% for member in team.members %}
+  <tr>
+    <td>{{ member.display_name }}</td>
+    <td><a href="mailto:{{ member.user.email }}">{{ member.user.email }}</a></td>
+    <td><code>{{ member.access.username }}</code></td>
+    <td><code>{{ member.access.password }}</code></td>
+  </tr>
+  {% endfor %}
+</table>
+{% endfor %}
+
+<p class="muted">
+  Deployed from <code>{{ deployment.git_url }}</code> at tag
+  <code>{{ deployment.release_tag }}</code>.
+</p>
+{% endblock %}

@@ -8,6 +8,12 @@ can render progress.
 Every endpoint enforces deployment-level access via `ensure_deployment_access`
 to prevent IDOR — without it, any authenticated user could read foreign task
 logs (which include Terraform outputs, IPs, etc.).
+
+Tasks contain operational data — terraform stdout/stderr, packer build chatter,
+worker stack traces — that members shouldn't see. Endpoints additionally
+enforce ``ensure_deployment_owner_view`` so only the deployment creator,
+teachers, and admins can fetch them. Members get a 403 here even though they
+can read the deployment metadata via ``GET /deployments/{id}``.
 """
 
 from uuid import UUID
@@ -21,7 +27,7 @@ from app.database import get_db
 from app.models import User
 from app.schemas import TaskResponse
 from app.utils.keycloak_auth import get_current_user_keycloak
-from app.utils.permissions import ensure_deployment_access
+from app.utils.permissions import ensure_deployment_access, ensure_deployment_owner_view
 
 router = APIRouter()
 
@@ -32,7 +38,7 @@ def get_deployment_tasks(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user_keycloak),
 ):
-    """List all tasks for a deployment the caller has access to."""
+    """List all tasks for a deployment the caller has owner-access to."""
     deployment = crud_deployments.get_deployment(db, deployment_id)
     if not deployment:
         raise HTTPException(
@@ -40,6 +46,7 @@ def get_deployment_tasks(
             detail="Deployment not found",
         )
     ensure_deployment_access(deployment, current_user, db)
+    ensure_deployment_owner_view(deployment, current_user)
     return crud_tasks.get_tasks(db, deployment_id=deployment_id)
 
 
@@ -49,7 +56,7 @@ def get_task(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user_keycloak),
 ):
-    """Fetch a single task; access is checked against its parent deployment."""
+    """Fetch a single task; only the deployment owner-view sees it."""
     task = crud_tasks.get_task(db, task_id)
     if not task:
         raise HTTPException(
@@ -63,4 +70,5 @@ def get_task(
             detail="Deployment for task not found",
         )
     ensure_deployment_access(deployment, current_user, db)
+    ensure_deployment_owner_view(deployment, current_user)
     return task
