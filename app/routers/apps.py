@@ -37,157 +37,491 @@ router = APIRouter()
 
 
 # ----------------------------------------------------------------
-# HELPER FUNCTIONS FOR PARSING HCL VARIABLES
+# OPENSTACK-MARKER PARSING (HCL VARIABLES)
 # ----------------------------------------------------------------
-def _detect_openstack_enum(var_name: str, description: str) -> str | None:
-    """Detect if variable is an OpenStack resource enum"""
-    var_lower = var_name.lower()
-    desc_lower = description.lower()
-    
-    # Check for network-related variables
-    if any(keyword in var_lower for keyword in ['network', 'net_id', 'subnet']):
-        return "network"
-    
-    # Check for flavor/instance type
-    if any(keyword in var_lower for keyword in ['flavor', 'instance_type', 'instance_size']):
-        return "flavor"
-    
-    # Check for security groups
-    if 'security' in var_lower and 'group' in var_lower:
-        return "security_group"
-    
-    # Check for floating IP pool
-    if 'floating' in var_lower and ('ip' in var_lower or 'pool' in var_lower):
-        return "floating_ip_pool"
-    
-    # Check for image
-    if any(keyword in var_lower for keyword in ['image', 'image_id', 'image_name']):
-        return "image"
-    
-    # Check for keypair
-    if any(keyword in var_lower for keyword in ['keypair', 'key_pair', 'ssh_key']):
-        return "keypair"
-    
-    # Check for volume
-    if 'volume' in var_lower:
-        return "volume"
-    
-    # Check description for hints
-    if 'network' in desc_lower and 'uuid' in desc_lower:
-        return "network"
-    if 'flavor' in desc_lower or 'instance type' in desc_lower:
-        return "flavor"
-    if 'security group' in desc_lower:
-        return "security_group"
-    
-    return None
+# Apps deklarieren Value-Help für OpenStack-Resourcen ausschließlich
+# über einen expliziten Marker in der ``description`` der Variable.
+# KEINE Heuristik. Keine Namens-Inferenz. Keine Description-Substring-
+# Matches. Wer den Marker nicht setzt, bekommt schlicht einen Free-Text-
+# Input — zero magic, voller Kontrolle für den App-Autor.
+#
+# Grammatik (positional, mit Defaults):
+#
+#     @openstack:<type>[:<mode>][:<multi>]
+#
+#   <type>   — eine der unten gelisteten Resource-Kinds (siehe ``_OS_TYPES``)
+#   <mode>   — 'id' | 'name'   (default: 'name'; siehe auch
+#              ``_NAME_ONLY_TYPES`` für Resourcen, bei denen 'id' praktisch
+#              sinnlos ist)
+#   <multi>  — 'multi' | 'list' | 'single'  ('list' ist Synonym für 'multi'.
+#              Default ohne Marker-Slot: aus dem HCL-Typ abgeleitet —
+#              ``list(...)``/``set(...)``/``tuple(...)``/``list``/``set``
+#              → multi, sonst single. ``map(...)`` und ``object(...)`` sind
+#              technische Kollektionen, gelten hier aber als single — wer
+#              die als Multi will, schreibt ``:multi`` explizit.)
+#
+# Beispiele:
+#     @openstack:network                        → network, name-mode, multi aus HCL
+#     @openstack:network:id                     → network, id-mode
+#     @openstack:security_group:name:multi      → SG, name-mode, multi
+#     @openstack:flavor::multi                  → leerer Mode-Slot ⇒ default 'name'
+#     @openstack:image:id:single                → image, id-mode, single (auch wenn
+#                                                  HCL ``list(string)`` wäre →
+#                                                  Konfliktcheck schlägt zu)
+#
+# Der Marker darf an einer beliebigen Stelle in der Description stehen,
+# muss aber an einem Wort-Ende terminieren (Whitespace, Zeilenende oder
+# Satzzeichen `.,;:!?)]"'`).
+#
+# Mehrere Marker in einer Description: der erste mit BEKANNTEM Type
+# gewinnt. Marker mit unbekanntem Type (z.B. „migration:
+# ``@openstack:vm`` → ``@openstack:network``" als Doku-Snippet) werden
+# übersprungen, damit der echte Marker dahinter trotzdem zieht. Wenn
+# KEIN Marker einen bekannten Type hat, ist das ein Fehler (der erste
+# unbekannte wird mit ``meintest du …?``-Hint gemeldet).
+#
+# Fehlerbehandlung: malformierte ODER ungültige Marker werfen eine
+# ``MarkerError``. Diese wird beim Parser pro Variable gefangen und im
+# Variable-Payload als ``markerError``-Feld an das Frontend mitgesendet
+# — die betroffene Variable rendert dann als Free-Text mit Inline-Hint,
+# alle anderen Variablen bleiben benutzbar. Dadurch ist EIN Tippfehler
+# kein Wizard-Showstopper, der App-Autor sieht ihn aber direkt im UI.
+# ----------------------------------------------------------------
+
+# Liste der unterstützten OpenStack-Resource-Types. Muss konsistent
+# sein mit:
+#  - backend/app/routers/openstack_resources.py (Listen-Endpoints)
+#  - frontend/src/types/index.ts (`AppVariableOsType`)
+#  - frontend/src/components/OpenStackResourcePicker.vue (Render)
+_OS_TYPES: set[str] = {
+    "network",
+    "subnet",
+    "flavor",
+    "image",
+    "keypair",
+    "security_group",
+    "floating_ip_pool",
+    "volume",
+    "router",
+    "availability_zone",
+}
+
+# Resource-Kinds, die in OpenStack faktisch keine UUID haben oder
+# durchgängig namensbasiert adressiert werden — z.B. Keypairs (Nova
+# nutzt nur Namen), Availability Zones (haben gar keine UUID),
+# Floating-IP-Pools (External Networks, in Modulen via Name).
+#
+# Marker-only-Modus: dieser Default greift NUR, wenn der Autor mode
+# weglässt. ``@openstack:keypair`` → mode='name'. ``@openstack:keypair:id``
+# wird respektiert (App-Autor weiß was er tut), aber praktisch sinnlos.
+# Wir warnen nicht aktiv — wer einen Picker für UUID-lose Resourcen will,
+# bekommt eben eine leere ID-Liste und merkt es spätestens beim Deploy.
+_NAME_ONLY_TYPES: set[str] = {"keypair", "availability_zone", "floating_ip_pool"}
+
+# Marker-Regex. Wir matchen das ganze Token an Wort-Grenzen, damit
+# Beispiele in Prosa wie ``"siehe @openstack:network in der Doku"``
+# erkannt werden, aber ein zufälliges ``"@openstackbar"`` NICHT matcht.
+# Slot-Inhalt darf KEIN Whitespace haben. Vier oder mehr Doppelpunkte
+# = malformed (siehe ``_TOO_MANY_SEGMENTS_RE``).
+#
+# Boundary-Zeichen rechts: alles was kein Identifier-Zeichen ist —
+# Whitespace, Zeilenende, gängige Satzzeichen ``. , ; : ! ? ) ] " '``.
+# Linke Grenze: Anfang oder dieselben Boundary-Zeichen.
+_MARKER_RE = re.compile(
+    r"""
+    (?:^|(?<=[\s.,;:!?()\[\]"']))   # Linke Grenze: Anfang oder Whitespace/Satzzeichen
+    @openstack
+    :([A-Za-z][A-Za-z0-9_]*)        # 1: type
+    (?::([A-Za-z]*))?               # 2: mode-Slot (kann leer sein)
+    (?::([A-Za-z]*))?               # 3: multi-Slot (kann leer sein)
+    (?=$|[\s.,;:!?)\]"'])           # Rechte Grenze
+    """,
+    re.VERBOSE,
+)
+
+# Schnell-Check: der Marker hat zu viele Segmente?
+# ``@openstack:network:id:multi:extra`` → fail.
+# Wir verlangen, dass JEDES der 4+ Segmente nicht-leer ist, sonst
+# würde ``@openstack:network:id:multi:`` (Trailing-Colon, klare 3-Slot-
+# Form) fälschlich als „zu viele Segmente" gefangen.
+_TOO_MANY_SEGMENTS_RE = re.compile(
+    r"@openstack(?::[A-Za-z0-9_]+){4,}",
+    re.IGNORECASE,
+)
+
+
+# Erkennung eines „Marker-versuchten-aber-falsch"-Inputs. Wir feuern,
+# wenn die Description ``@openstack:`` enthält, der strikte Marker-Regex
+# aber NICHTS findet. Typische Fälle: Bindestrich/Slash/Equals als
+# Trenner, Whitespace im Marker, leerer Type, kaputte Typen, ...
+# Wir matchen `@openstack` gefolgt von `:` ODER von Whitespace+`:`,
+# damit „@openstack: <type>" auch greift.
+_BAD_PREFIX_RE = re.compile(
+    r"@openstack\s*:",
+    re.IGNORECASE,
+)
+
+
+class MarkerError(ValueError):
+    """
+    Erhoben, wenn ein ``@openstack``-Marker syntaktisch oder semantisch
+    fehlerhaft ist. Wird im Endpoint in HTTP 400 übersetzt, damit der
+    App-Autor den Fehler sofort beim ersten ``GET /apps/{id}/variables``
+    sieht — statt dass die Variable stillschweigend als Free-Text-Input
+    erscheint.
+    """
+
+    def __init__(self, var_name: str, message: str):
+        super().__init__(f"Variable '{var_name}': {message}")
+        self.var_name = var_name
+        self.message = message
+
+
+def _parse_marker(
+    var_name: str, var_type: str, description: str
+) -> tuple[str | None, str | None, bool | None]:
+    """
+    Parst den ``@openstack:<type>[:<mode>][:<multi>]``-Marker aus der
+    Description. Liefert ``(None, None, None)`` wenn KEIN Marker da ist
+    (das ist KEIN Fehler — die Variable wird dann als Free-Text gerendert).
+
+    Multi-Marker-Verhalten: Findet die Funktion mehrere Marker, nimmt sie
+    den ersten, dessen Type bekannt ist. Das ist absichtlich tolerant —
+    Apps zitieren manchmal ältere Marker-Schreibweisen in der Description
+    („migration: ``@openstack:vm`` → ``@openstack:network``"). Mode/Multi-
+    Validierungs-Fehler des gewählten Markers sind weiterhin hart, weil
+    sie konkret und nicht-tolerierbar sind.
+
+    Wirft ``MarkerError`` bei:
+      - malformiertem Marker (zu viele Segmente, internes Whitespace,
+        unbekannte mode/multi-Tokens, ``@openstack:`` ohne erkennbaren
+        Type-Slot, Slot-Trenner mit Sonderzeichen statt ``:``)
+      - widersprüchlichem Marker vs. HCL-Type (``:single`` mit
+        ``type = list(...)`` oder ``:multi`` mit ``type = number``)
+
+    Returns: (os_type, mode, multi). ``mode``/``multi`` können ``None``
+    bleiben (Slot ungesetzt) — die Defaults werden vom Caller über
+    ``_apply_defaults`` appliziert.
+    """
+    if not description:
+        return (None, None, None)
+
+    # Vier+ Segmente sind nie legitim. Schnellt zuerst durch, BEVOR der
+    # Haupt-Regex (der nach 3 Slots aufhört) das gar nicht mitkriegt.
+    if _TOO_MANY_SEGMENTS_RE.search(description):
+        raise MarkerError(
+            var_name,
+            "marker hat zu viele Segmente — erlaubt: "
+            "@openstack:<type>[:<mode>][:<multi>]",
+        )
+
+    matches = list(_MARKER_RE.finditer(description))
+    if not matches:
+        # Strikter Hard-Fail-Pfad: jemand hat ``@openstack:`` getippt,
+        # aber unsere Grammatik passt nicht — z.B. wegen Whitespace,
+        # Bindestrich, ``=``, Slash. Stilles Ignorieren würde den Bug
+        # verstecken (Variable rendert als Free-Text und niemand merkt
+        # was). Lieber laut.
+        if _BAD_PREFIX_RE.search(description):
+            raise MarkerError(
+                var_name,
+                "marker konnte nicht geparst werden — erlaubt ist nur "
+                "``@openstack:<type>[:<mode>][:<multi>]`` mit Doppelpunkten "
+                "als Trenner und ohne Whitespace zwischen den Segmenten",
+            )
+        return (None, None, None)
+
+    # Erster Marker mit BEKANNTEM Type gewinnt. Marker mit unbekanntem
+    # Type werden übersprungen (toleriert): wenn Apps in der Description
+    # historische Marker-Beispiele erwähnen wie ``@openstack:vm`` (kein
+    # OS-Resource-Type), darf der echte ``@openstack:network`` zwei
+    # Sätze später trotzdem greifen. ABER: wir merken uns den ersten
+    # Marker mit gültiger Syntax aber unbekanntem Type, um eine
+    # bessere Fehlermeldung zu geben, falls KEIN Match gefunden wird.
+    first_unknown: tuple[str, str] | None = None  # (raw_type, suggestion)
+    chosen = None
+    for m in matches:
+        raw_type = (m.group(1) or "")
+        os_type_candidate = raw_type.lower()
+        if os_type_candidate in _OS_TYPES:
+            chosen = (m, raw_type, m.group(2), m.group(3))
+            break
+        if first_unknown is None:
+            first_unknown = (raw_type, _closest_match(os_type_candidate, _OS_TYPES) or "")
+
+    if chosen is None:
+        # Es gab Marker, aber alle mit unbekannten Types. Hartes Fail
+        # mit Hint auf den ersten — das ist mit hoher Wahrscheinlichkeit
+        # der Tippfehler des Autors.
+        raw_type, suggestion = first_unknown  # type: ignore[misc]
+        hint = f"; meintest du '{suggestion}'?" if suggestion else ""
+        raise MarkerError(
+            var_name,
+            f"unbekannter resource-type '{raw_type}'{hint} — "
+            f"erwartet: {sorted(_OS_TYPES)}",
+        )
+
+    _, raw_type, raw_mode, raw_multi = chosen
+    os_type = raw_type.lower()
+
+    mode: str | None = None
+    if raw_mode is not None:
+        rm = raw_mode.lower()
+        if rm == "":
+            # Leerer Slot ist erlaubt: ``@openstack:flavor::multi`` heißt
+            # „mode = default, multi = multi". Wir lassen ``mode = None``,
+            # die Defaults werden vom Caller appliziert.
+            pass
+        elif rm in ("id", "name"):
+            mode = rm
+        elif rm in ("multi", "list", "single"):
+            # Häufiger Author-Fehler: User wollte ``:multi`` setzen aber
+            # hat den Mode-Slot nicht leer gelassen. Statt einer
+            # generischen „ungültiger mode"-Meldung den korrekten
+            # Marker zeigen.
+            raise MarkerError(
+                var_name,
+                f"'{raw_mode}' ist ein multi-Flag, nicht ein Mode — "
+                f"schreibe den Marker mit leerem Mode-Slot, z.B. "
+                f"``@openstack:{os_type}::{rm}``",
+            )
+        else:
+            mode_suggestion = _closest_match(rm, {"id", "name"})
+            hint = f"; meintest du '{mode_suggestion}'?" if mode_suggestion else ""
+            raise MarkerError(
+                var_name,
+                f"ungültiger mode '{raw_mode}'{hint} — erwartet 'id' oder 'name'",
+            )
+
+    multi: bool | None = None
+    if raw_multi is not None:
+        mm = raw_multi.lower()
+        if mm == "":
+            pass
+        elif mm in ("multi", "list"):
+            # ``list`` ist Synonym für ``multi`` — siehe Modul-Docstring.
+            multi = True
+        elif mm == "single":
+            multi = False
+        else:
+            multi_suggestion = _closest_match(mm, {"multi", "list", "single"})
+            hint = f"; meintest du '{multi_suggestion}'?" if multi_suggestion else ""
+            raise MarkerError(
+                var_name,
+                f"ungültiger multi-Flag '{raw_multi}'{hint} — erwartet "
+                "'multi', 'list' oder 'single'",
+            )
+
+    # Konsistenz-Check: explizite Marker-Werte gegen HCL-Type.
+    # ``list``/``set``/``tuple`` sind die kollektion-fähigen Picker-Types
+    # — bei diesen ist ``:multi`` natürlich. ``map``/``object`` sind
+    # technische Kollektionen, aber der Picker kann sie nicht sinnvoll
+    # bedienen — wir behandeln sie wie single-strings (für die
+    # Konflikt-Erkennung). Wer eine map mit ``:multi`` will, kriegt
+    # einen Konflikt-Error mit klarem Wording.
+    type_lower = (var_type or "").strip().lower()
+    is_collection_type = (
+        type_lower.startswith(("list(", "set(", "tuple("))
+        or type_lower in ("list", "set")
+    )
+    if multi is True and not is_collection_type and type_lower not in ("", "string"):
+        # ``string`` lassen wir durchgehen, weil viele Apps ``type = string``
+        # ohne Multi-Marker meinen und das Frontend dann eh CSV liefert.
+        # Aber etwa ``type = number`` oder ``type = map(...)`` mit
+        # ``:multi`` ist offensichtlich widersprüchlich.
+        raise MarkerError(
+            var_name,
+            f"marker deklariert ':multi', aber HCL-Type ist '{var_type}' "
+            "— erlaubt sind nur ``string``, ``list(...)``, ``set(...)`` "
+            "und ``tuple(...)``",
+        )
+    if multi is False and is_collection_type:
+        raise MarkerError(
+            var_name,
+            f"marker deklariert ':single', aber HCL-Type ist '{var_type}' "
+            "(eine list/set/tuple-Kollektion) — fixe einen der beiden",
+        )
+
+    return (os_type, mode, multi)
+
+
+def _apply_defaults(
+    os_type: str, mode: str | None, multi: bool | None, var_type: str
+) -> tuple[str, bool]:
+    """
+    Wendet die dokumentierten Defaults an, wenn der Marker einzelne
+    Slots leer lässt:
+
+    - ``mode``: 'name'. Für Resourcen aus ``_NAME_ONLY_TYPES`` (Keypair,
+      Availability Zone, Floating-IP-Pool) ist 'name' nicht nur Default,
+      sondern faktisch die einzige sinnvolle Wahl — das Set ist trotzdem
+      nur informational, weil ``:id`` für diese Typen zwar respektiert
+      wird, aber kaum nutzbare Resultate liefert.
+    - ``multi``: aus HCL-Type abgeleitet — ``list(...)``/``set(...)``/
+      ``tuple(...)``/``list``/``set`` → True, sonst False.
+    """
+    if mode is None:
+        mode = "name"
+
+    if multi is None:
+        type_lower = (var_type or "").strip().lower()
+        # ``map(...)``/``object({...})`` sind technisch Kollektionen,
+        # aber der Picker kann sie nicht sinnvoll bedienen — wir
+        # behandeln sie als "single" und überlassen es dem Autor, das
+        # mit einem expliziten ``:multi`` zu fordern, falls er das wirklich
+        # will. ``list``/``set``/``tuple`` werden als multi auto-detected.
+        multi = (
+            type_lower.startswith(("list(", "set(", "tuple("))
+            or type_lower in ("list", "set")
+        )
+
+    return (mode, multi)
+
+
+def _closest_match(s: str, candidates: set[str]) -> str | None:
+    """
+    Sehr einfache Levenshtein-1-Heuristik für „meintest du …?"-Hints.
+    Wir laden ``difflib`` lazy, weil das die einzige Stelle ist, wo wir
+    es brauchen.
+    """
+    if not s:
+        return None
+    import difflib
+    matches = difflib.get_close_matches(s, candidates, n=1, cutoff=0.7)
+    return matches[0] if matches else None
+
+
+def _line_number_at(content: str, char_index: int) -> int:
+    """1-basierter Zeilen-Index für eine Char-Position. Wir benutzen
+    das, um in MarkerError-Messages auf die Zeile in ``variables.tf``
+    zu zeigen, statt nur den Variablennamen zu nennen — Apps mit 30+
+    Variablen sind sonst grep-Arbeit für den Autor."""
+    return content.count("\n", 0, char_index) + 1
+
+
+def _parse_one_variable(
+    *,
+    var_name: str,
+    var_block: str,
+    var_block_offset: int,
+    file_content: str,
+    file_label: str,
+    source: str,
+) -> Dict[str, Any]:
+    """
+    Verarbeitet einen einzelnen ``variable "..." { ... }``-Block.
+
+    Liefert das Variable-Dict immer; etwaige Marker-Fehler werden NICHT
+    geworfen, sondern im Feld ``markerError`` an die Variable angehängt.
+    Damit kann das Frontend die Variable als Free-Text rendern und den
+    Fehler inline zeigen — die App bleibt benutzbar, der Autor sieht
+    den Fehler aber sofort. Globaler 400-Abbruch wäre die schlechte
+    Variante (1 schlechter Marker → ganzer Wizard kaputt).
+    """
+    # Extract type
+    type_match = re.search(r'type\s*=\s*([^\n]+)', var_block)
+    var_type = type_match.group(1).strip() if type_match else "string"
+
+    # Extract description
+    desc_match = re.search(r'description\s*=\s*"([^"]*)"', var_block)
+    description = desc_match.group(1) if desc_match else ""
+
+    # Extract default value
+    default_match = re.search(r'default\s*=\s*([^\n]+)', var_block)
+    default_value = default_match.group(1).strip() if default_match else None
+
+    # Remove surrounding quotes from string literals
+    if default_value and default_value.startswith('"') and default_value.endswith('"'):
+        default_value = default_value[1:-1]
+
+    required = default_value is None
+
+    var_info: Dict[str, Any] = {
+        "name": var_name,
+        "type": var_type,
+        "description": description,
+        "default": default_value,
+        "required": required,
+        "source": source,
+    }
+
+    # @openstack-Marker auswerten. Per-Variable-Try/Except: ein Tippfehler
+    # in EINER Variablen-Description darf nicht den gesamten Wizard
+    # blockieren; der Fehler reist im Payload mit der Variablen mit.
+    try:
+        os_type, raw_mode, raw_multi = _parse_marker(var_name, var_type, description)
+    except MarkerError as exc:
+        line = _line_number_at(file_content, var_block_offset)
+        var_info["markerError"] = {
+            "variable": exc.var_name,
+            "message": exc.message,
+            "location": f"{file_label}:{line}",
+        }
+        return var_info
+
+    if os_type:
+        mode, multi = _apply_defaults(os_type, raw_mode, raw_multi, var_type)
+        var_info["osType"] = os_type
+        var_info["osMode"] = mode
+        var_info["osMulti"] = multi
+
+    return var_info
 
 
 def _parse_terraform_variables(file_path: str) -> List[Dict[str, Any]]:
-    """Parse Terraform `variables.tf` file"""
+    """Parse Terraform `variables.tf` file. Marker-Fehler einzelner
+    Variablen werden im Variable-Payload als ``markerError`` mitgesendet
+    (nicht geworfen) — siehe ``_parse_one_variable``."""
     with open(file_path, 'r') as f:
         content = f.read()
-    
+
     variables = []
     # Regex to match variable blocks: variable "name" { ... }
     pattern = r'variable\s+"([^"]+)"\s*\{([^}]+)\}'
-    
+
     for match in re.finditer(pattern, content, re.DOTALL):
         var_name = match.group(1)
         var_block = match.group(2)
         # Filter: users und image_name rauslassen
         if var_name == "users" or var_name == "image_name":
             continue
-        # Extract type
-        type_match = re.search(r'type\s*=\s*([^\n]+)', var_block)
-        var_type = type_match.group(1).strip() if type_match else "string"
-        
-        # Extract description
-        desc_match = re.search(r'description\s*=\s*"([^"]*)"', var_block)
-        description = desc_match.group(1) if desc_match else ""
-        
-        # Extract default value
-        default_match = re.search(r'default\s*=\s*([^\n]+)', var_block)
-        default_value = default_match.group(1).strip() if default_match else None
-        
-        # Remove surrounding quotes from string literals to prevent double-escaping
-        if default_value and default_value.startswith('"') and default_value.endswith('"'):
-            default_value = default_value[1:-1]
-        
-        # Check if required (no default = required)
-        required = default_value is None
-        
-        # Detect OpenStack enum type
-        openstack_type = _detect_openstack_enum(var_name, description)
-        
-        var_info = {
-            "name": var_name,
-            "type": var_type,
-            "description": description,
-            "default": default_value,
-            "required": required,
-            "source": "terraform"
-        }
-        
-        if openstack_type:
-            var_info["openstack_type"] = openstack_type
-        
-        variables.append(var_info)
-    
+        variables.append(_parse_one_variable(
+            var_name=var_name,
+            var_block=var_block,
+            var_block_offset=match.start(),
+            file_content=content,
+            file_label="terraform/variables.tf",
+            source="terraform",
+        ))
+
     return variables
 
 
 def _parse_packer_variables(file_path: str) -> List[Dict[str, Any]]:
-    """Parse Packer `variables.pkr.hcl` file"""
+    """Parse Packer `variables.pkr.hcl` file. Marker-Fehler reisen pro
+    Variable im ``markerError``-Feld mit; siehe ``_parse_one_variable``."""
     with open(file_path, 'r') as f:
         content = f.read()
-    
+
     variables = []
     # Packer uses similar syntax: variable "name" { ... }
     pattern = r'variable\s+"([^"]+)"\s*\{([^}]+)\}'
-    
+
     for match in re.finditer(pattern, content, re.DOTALL):
         var_name = match.group(1)
         var_block = match.group(2)
         # Filter: image_name rauslassen
         if var_name == "image_name":
             continue
-        # Extract type
-        type_match = re.search(r'type\s*=\s*([^\n]+)', var_block)
-        var_type = type_match.group(1).strip() if type_match else "string"
-        
-        # Extract description
-        desc_match = re.search(r'description\s*=\s*"([^"]*)"', var_block)
-        description = desc_match.group(1) if desc_match else ""
-        
-        # Extract default value
-        default_match = re.search(r'default\s*=\s*([^\n]+)', var_block)
-        default_value = default_match.group(1).strip() if default_match else None
-        
-        # Remove surrounding quotes from string literals to prevent double-escaping
-        if default_value and default_value.startswith('"') and default_value.endswith('"'):
-            default_value = default_value[1:-1]
-        
-        # Check if required
-        required = default_value is None
-        
-        # Detect OpenStack enum type
-        openstack_type = _detect_openstack_enum(var_name, description)
-        
-        var_info = {
-            "name": var_name,
-            "type": var_type,
-            "description": description,
-            "default": default_value,
-            "required": required,
-            "source": "packer"
-        }
-        
-        if openstack_type:
-            var_info["openstack_type"] = openstack_type
-        
-        variables.append(var_info)
-    
+        variables.append(_parse_one_variable(
+            var_name=var_name,
+            var_block=var_block,
+            var_block_offset=match.start(),
+            file_content=content,
+            file_label="packer/variables.pkr.hcl",
+            source="packer",
+        ))
+
     return variables
 
 
@@ -299,26 +633,40 @@ def get_app_variables(
     try:
         # Clone repository with sparse checkout (only variable files)
         repo_path = git_service.clone_release_vars(app.git_link, version, deployment_id)
-        
+
         variables = []
-        
+
         # Parse Terraform variables
         tf_vars_path = os.path.join(repo_path, "terraform", "variables.tf")
         if os.path.exists(tf_vars_path):
             logger.info(f"Parsing Terraform variables from {tf_vars_path}")
             variables.extend(_parse_terraform_variables(tf_vars_path))
-        
+
         # Parse Packer variables
         packer_vars_path = os.path.join(repo_path, "packer", "variables.pkr.hcl")
         if os.path.exists(packer_vars_path):
             logger.info(f"Parsing Packer variables from {packer_vars_path}")
             variables.extend(_parse_packer_variables(packer_vars_path))
-        
+
         if not variables:
             logger.warning(f"No variables found in {repo_path}")
-        
+
+        # Marker-Fehler reisen pro Variable im ``markerError``-Feld mit
+        # — der Endpoint wirft kein 400 mehr für einzelne Marker-Bugs,
+        # sondern überlässt dem Frontend die Anzeige inline. Ein bug-
+        # behaftetes Marker → eine Variable als Free-Text + Inline-Hint;
+        # alle anderen Variablen bleiben benutzbar.
+        bad = [v for v in variables if v.get("markerError")]
+        if bad:
+            logger.warning(
+                "App %s version %s has %d variable(s) with bad @openstack markers: %s",
+                app_id, version, len(bad), [v["name"] for v in bad],
+            )
+
         return variables
-    
+
+    except HTTPException:
+        raise
     except Exception:
         logger.exception(f"Failed to get variables for app {app_id} version {version}")
         raise HTTPException(

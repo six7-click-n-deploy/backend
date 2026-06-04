@@ -6,7 +6,18 @@ import logging
 import threading
 
 from app.database import engine, Base
-from app.routers import auth_keycloak, users, courses, apps, deployments, teams, tasks, quotas, openstack_credentials
+from app.routers import (
+    auth_keycloak,
+    users,
+    courses,
+    apps,
+    deployments,
+    teams,
+    tasks,
+    quotas,
+    openstack_credentials,
+    openstack_resources,
+)
 from app.config import settings
 from app.services.celery_event_listener import start_event_listener
 from app.services.reconciler import run_reconciler
@@ -90,6 +101,14 @@ app.include_router(tasks.router, prefix="/tasks", tags=["Tasks"])
 app.include_router(teams.router, prefix="/teams", tags=["Teams"])
 app.include_router(quotas.router, prefix="/quotas", tags=["Quotas"])
 app.include_router(openstack_credentials.router, tags=["OpenStack Credentials"])
+# Read-API für OpenStack-Resourcen (Networks, Flavors, Images, ...).
+# Wird vom Wizard für Value-Help-Dropdowns genutzt, damit User keine
+# UUIDs aus Horizon abtippen müssen.
+app.include_router(
+    openstack_resources.router,
+    prefix="/me/openstack/resources",
+    tags=["OpenStack Resources"],
+)
 
 # ----------------------------------------------------------------
 # HEALTH CHECK

@@ -1,8 +1,8 @@
 from sqlalchemy.orm import Session
-from typing import List, Optional
+from typing import List, Optional, Iterable
 from uuid import UUID
 
-from app.models import Course
+from app.models import Course, User
 from app.schemas import CourseCreate, CourseUpdate
 
 
@@ -30,22 +30,94 @@ def update_course(db: Session, course_id: UUID, course_update: CourseUpdate) -> 
     db_course = get_course(db, course_id)
     if not db_course:
         return None
-    
+
     update_data = course_update.model_dump(exclude_unset=True)
     for field, value in update_data.items():
         setattr(db_course, field, value)
-    
+
     db.commit()
     db.refresh(db_course)
     return db_course
 
 
 def delete_course(db: Session, course_id: UUID) -> bool:
-    """Delete a course"""
+    """Delete a course.
+
+    The user-course link is a nullable FK on ``users.courseId`` and
+    deleting the course leaves enrolled users dangling. We unlink them
+    first so the deletion is idempotent and never trips the FK
+    constraint, regardless of how the schema is configured.
+    """
     db_course = get_course(db, course_id)
     if not db_course:
         return False
-    
+
+    # Detach members so the row deletion is allowed even if the FK
+    # is configured as ``ON DELETE RESTRICT``.
+    db.query(User).filter(User.courseId == course_id).update(
+        {User.courseId: None}, synchronize_session=False
+    )
+
     db.delete(db_course)
+    db.commit()
+    return True
+
+
+# ----------------------------------------------------------------
+# MEMBER MANAGEMENT
+# ----------------------------------------------------------------
+# Members live as ``users.courseId`` on the ``User`` row, not in a
+# join table — a user is in at most one course at a time. The helpers
+# below treat that single FK as a small membership API so the router
+# stays slim.
+
+def get_course_members(db: Session, course_id: UUID) -> List[User]:
+    """Return users currently enrolled in ``course_id``."""
+    return db.query(User).filter(User.courseId == course_id).order_by(User.username).all()
+
+
+def add_users_to_course(
+    db: Session,
+    course_id: UUID,
+    user_ids: Iterable[UUID],
+) -> List[User]:
+    """Add a batch of users to a course.
+
+    Sets ``users.courseId`` for every existing user in ``user_ids``.
+    Missing user-ids are skipped silently — the caller already
+    validated the picker contents and there's no useful error to
+    surface for "this user vanished between picker and submit".
+    Returns the affected user rows post-update.
+    """
+    ids = [uid for uid in user_ids if uid is not None]
+    if not ids:
+        return []
+
+    db.query(User).filter(User.userId.in_(ids)).update(
+        {User.courseId: course_id}, synchronize_session=False
+    )
+    db.commit()
+    return db.query(User).filter(User.userId.in_(ids)).all()
+
+
+def remove_user_from_course(
+    db: Session,
+    course_id: UUID,
+    user_id: UUID,
+) -> bool:
+    """Remove ``user_id`` from ``course_id``.
+
+    Returns ``True`` if the user was actually a member of that course
+    and got detached, ``False`` if they weren't (so the router can
+    answer 404 cleanly). Detaching a user from a different course is
+    NOT done — that would silently mutate unrelated state.
+    """
+    user = db.query(User).filter(
+        User.userId == user_id,
+        User.courseId == course_id,
+    ).first()
+    if not user:
+        return False
+    user.courseId = None
     db.commit()
     return True
