@@ -1,4 +1,4 @@
-from typing import Iterable, List
+from collections.abc import Iterable
 from uuid import UUID
 
 from sqlalchemy.orm import Session
@@ -72,7 +72,7 @@ def delete_course(db: Session, course_id: UUID) -> bool:
 # below treat that single FK as a small membership API so the router
 # stays slim.
 
-def get_course_members(db: Session, course_id: UUID) -> List[User]:
+def get_course_members(db: Session, course_id: UUID) -> list[User]:
     """Return users currently enrolled in ``course_id``."""
     return db.query(User).filter(User.courseId == course_id).order_by(User.username).all()
 
@@ -81,7 +81,7 @@ def add_users_to_course(
     db: Session,
     course_id: UUID,
     user_ids: Iterable[UUID],
-) -> List[User]:
+) -> list[User]:
     """Add a batch of users to a course.
 
     Sets ``users.courseId`` for every existing user in ``user_ids``.

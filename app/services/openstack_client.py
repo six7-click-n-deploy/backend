@@ -26,8 +26,9 @@ from __future__ import annotations
 import logging
 import threading
 import time
-from contextlib import contextmanager
-from typing import Any, Callable, Iterator
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager, suppress
+from typing import Any
 from uuid import UUID
 
 import openstack
@@ -115,10 +116,8 @@ def user_connection(db: Session, user: User) -> Iterator[Any]:
         # SDK ist „lass laufen, GC räumt auf". Wir versuchen es trotzdem
         # höflich, ignorieren Fehler.
         if conn is not None:
-            try:
+            with suppress(Exception):
                 conn.close()
-            except Exception:  # noqa: BLE001
-                pass
 
 
 # ----------------------------------------------------------------

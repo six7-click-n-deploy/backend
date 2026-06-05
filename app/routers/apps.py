@@ -1,19 +1,20 @@
-from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy.orm import Session
-from typing import List, Optional, Any, Dict
-from uuid import UUID
+import logging
 import os
 import re
-import logging
+from typing import Any
+from uuid import UUID
 
+from fastapi import APIRouter, Depends, HTTPException, status
+from sqlalchemy.orm import Session
+
+from app.crud import apps as crud_apps
 from app.database import get_db
 from app.models import User
-from app.schemas import AppCreate, AppUpdate, AppResponse, AppWithUser, AppWithVersions
+from app.schemas import AppCreate, AppResponse, AppUpdate, AppWithVersions
+from app.services.git_service import git_service
+from app.utils.app_image import build_image_data_url, parse_image_data_url
 from app.utils.keycloak_auth import get_current_user_keycloak
 from app.utils.permissions import ensure_resource_access
-from app.utils.app_image import parse_image_data_url, build_image_data_url
-from app.crud import apps as crud_apps
-from app.services.git_service import git_service
 
 
 def _serialize_app(app):
@@ -407,7 +408,7 @@ def _parse_one_variable(
     file_content: str,
     file_label: str,
     source: str,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """
     Verarbeitet einen einzelnen ``variable "..." { ... }``-Block.
 
@@ -436,7 +437,7 @@ def _parse_one_variable(
 
     required = default_value is None
 
-    var_info: Dict[str, Any] = {
+    var_info: dict[str, Any] = {
         "name": var_name,
         "type": var_type,
         "description": description,
@@ -468,11 +469,11 @@ def _parse_one_variable(
     return var_info
 
 
-def _parse_terraform_variables(file_path: str) -> List[Dict[str, Any]]:
+def _parse_terraform_variables(file_path: str) -> list[dict[str, Any]]:
     """Parse Terraform `variables.tf` file. Marker-Fehler einzelner
     Variablen werden im Variable-Payload als ``markerError`` mitgesendet
     (nicht geworfen) — siehe ``_parse_one_variable``."""
-    with open(file_path, 'r') as f:
+    with open(file_path) as f:
         content = f.read()
 
     variables = []
@@ -497,10 +498,10 @@ def _parse_terraform_variables(file_path: str) -> List[Dict[str, Any]]:
     return variables
 
 
-def _parse_packer_variables(file_path: str) -> List[Dict[str, Any]]:
+def _parse_packer_variables(file_path: str) -> list[dict[str, Any]]:
     """Parse Packer `variables.pkr.hcl` file. Marker-Fehler reisen pro
     Variable im ``markerError``-Feld mit; siehe ``_parse_one_variable``."""
-    with open(file_path, 'r') as f:
+    with open(file_path) as f:
         content = f.read()
 
     variables = []
@@ -528,7 +529,7 @@ def _parse_packer_variables(file_path: str) -> List[Dict[str, Any]]:
 # ----------------------------------------------------------------
 # GET ALL APPS
 # ----------------------------------------------------------------
-@router.get("/", response_model=List[AppResponse])
+@router.get("/", response_model=list[AppResponse])
 def list_apps(
     skip: int = 0,
     limit: int = 100,
@@ -592,7 +593,7 @@ def get_app(
 # ----------------------------------------------------------------
 # GET APP VARIABLES
 # ----------------------------------------------------------------
-@router.get("/{app_id}/variables", response_model=List[Dict[str, Any]])
+@router.get("/{app_id}/variables", response_model=list[dict[str, Any]])
 def get_app_variables(
     app_id: UUID,
     version: str,
@@ -602,7 +603,7 @@ def get_app_variables(
     """
     Get dynamic app variables from app's Git repository
     Parses variables.tf file and returns all configurable variables
-    
+
     Returns:
     - name: Variable name
     - type: Variable type (string, number, bool, list, map, etc.)
@@ -616,20 +617,20 @@ def get_app_variables(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="App not found"
         )
-    
+
     # Check access permission
     ensure_resource_access(app.userId, current_user)
-    
+
     if not app.git_link:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="App has no Git repository configured"
         )
-    
+
     logger = logging.getLogger(__name__)
     deployment_id = f"vars_{app_id}_{version}".replace("/", "_")
     repo_path = None
-    
+
     try:
         # Clone repository with sparse checkout (only variable files)
         repo_path = git_service.clone_release_vars(app.git_link, version, deployment_id)
