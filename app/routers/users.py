@@ -1,19 +1,24 @@
-from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy.orm import Session
-from typing import List, Optional
 from uuid import UUID
 
-from app.database import get_db
-from app.models import User, UserRole
-from app.schemas import (
-    UserResponse, UserWithCourse, UserUpdate,
-    UserStatistics
-)
-from app.utils.keycloak_auth import get_current_user_keycloak, search_keycloak_users, get_keycloak_users_by_ids
-from app.utils.permissions import get_current_admin, get_current_teacher_or_admin, ensure_resource_access
-from app.crud import users as crud_users
+from fastapi import APIRouter, Depends, HTTPException, status
+from sqlalchemy.orm import Session
+
 from app.crud import apps as crud_apps
 from app.crud import deployments as crud_deployments
+from app.crud import users as crud_users
+from app.database import get_db
+from app.models import User, UserRole
+from app.schemas import UserResponse, UserStatistics, UserUpdate, UserWithCourse
+from app.utils.keycloak_auth import (
+    get_current_user_keycloak,
+    get_keycloak_users_by_ids,
+    search_keycloak_users,
+)
+from app.utils.permissions import (
+    ensure_resource_access,
+    get_current_admin,
+    get_current_teacher_or_admin,
+)
 
 router = APIRouter()
 
@@ -28,12 +33,12 @@ def get_me(current_user: User = Depends(get_current_user_keycloak)):
 # ----------------------------------------------------------------
 # GET ALL USERS (TEACHER/ADMIN ONLY)
 # ----------------------------------------------------------------
-@router.get("/", response_model=List[UserResponse])
+@router.get("/", response_model=list[UserResponse])
 def list_users(
     skip: int = 0,
     limit: int = 100,
-    role: Optional[UserRole] = None,
-    course_id: Optional[UUID] = None,
+    role: UserRole | None = None,
+    course_id: UUID | None = None,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_teacher_or_admin)
 ):
@@ -87,7 +92,7 @@ def search_users_keycloak(
     Search users directly from Keycloak by username, email, or name
     - **Requires**: TEACHER or ADMIN role
     - Returns users from Keycloak (not local DB)
-    
+
     Response:
     - id: Keycloak user ID
     - username: Username
@@ -101,7 +106,7 @@ def search_users_keycloak(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Search query must be at least 2 characters"
         )
-    
+
     from app.database import get_db
     db = next(get_db())
     from app.utils.keycloak_auth import sync_user_from_keycloak
@@ -144,14 +149,14 @@ def get_user(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="User not found"
         )
-    
+
     # Check access permission
     if current_user.role == UserRole.STUDENT and user_id != current_user.userId:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="You can only view your own profile"
         )
-    
+
     return user
 
 # ----------------------------------------------------------------
@@ -173,14 +178,14 @@ def get_user_statistics(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="User not found"
         )
-    
+
     # Check access permission
     ensure_resource_access(user_id, current_user)
-    
+
     # Get statistics
     apps = crud_apps.get_apps(db, user_id=user_id, limit=1000)
     deployments = crud_deployments.get_deployments(db, user_id=user_id, limit=1000)
-    
+
     return UserStatistics(
         total_apps=len(apps),
         total_deployments=len(deployments),
@@ -210,21 +215,21 @@ def update_user(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="User not found"
         )
-    
+
     # Students can only update their own profile
     if current_user.role == UserRole.STUDENT and user_id != current_user.userId:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="You can only update your own profile"
         )
-    
+
     # Students cannot change their role
     if current_user.role == UserRole.STUDENT and user_update.role:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="You cannot change your role"
         )
-    
+
     updated_user = crud_users.update_user(db, user_id, user_update)
     return updated_user
 

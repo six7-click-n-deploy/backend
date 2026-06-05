@@ -1,21 +1,21 @@
-from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy.orm import Session
-from typing import List
 from uuid import UUID
 
+from fastapi import APIRouter, Depends, HTTPException, status
+from sqlalchemy.orm import Session
+
+from app.crud import courses as crud_courses
 from app.database import get_db
 from app.models import User
 from app.schemas import (
     CourseCreate,
-    CourseUpdate,
-    CourseResponse,
-    CourseWithUsers,
     CourseMembersUpdate,
+    CourseResponse,
+    CourseUpdate,
+    CourseWithUsers,
     UserResponse,
 )
 from app.utils.keycloak_auth import get_current_user_keycloak
 from app.utils.permissions import get_current_teacher_or_admin
-from app.crud import courses as crud_courses
 
 router = APIRouter()
 
@@ -23,7 +23,7 @@ router = APIRouter()
 # ----------------------------------------------------------------
 # GET ALL COURSES
 # ----------------------------------------------------------------
-@router.get("/", response_model=List[CourseResponse])
+@router.get("/", response_model=list[CourseResponse])
 def list_courses(
     skip: int = 0,
     limit: int = 100,
@@ -130,7 +130,7 @@ def delete_course(
 # poking the user-update endpoint (which has its own role-change rules
 # that don't apply to "join a course").
 
-@router.get("/{course_id}/users", response_model=List[UserResponse])
+@router.get("/{course_id}/users", response_model=list[UserResponse])
 def list_course_members(
     course_id: UUID,
     db: Session = Depends(get_db),
@@ -151,7 +151,7 @@ def list_course_members(
 
 @router.post(
     "/{course_id}/users",
-    response_model=List[UserResponse],
+    response_model=list[UserResponse],
     status_code=status.HTTP_200_OK,
 )
 def add_course_members(

@@ -41,6 +41,7 @@ methods) is the upgrade path when the deployment grows.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import threading
 from collections import defaultdict, deque
@@ -131,10 +132,8 @@ class DeploymentPubSub:
             subs = self._subs.get(deployment_id)
             if not subs:
                 return
-            try:
+            with contextlib.suppress(ValueError):
                 subs.remove(queue)
-            except ValueError:
-                pass
             if not subs:
                 self._subs.pop(deployment_id, None)
         logger.debug("pubsub: unsubscribed from %s", deployment_id)
@@ -188,10 +187,8 @@ class DeploymentPubSub:
         try:
             queue.put_nowait(event)
         except asyncio.QueueFull:
-            try:
+            with contextlib.suppress(asyncio.QueueEmpty):
                 queue.get_nowait()
-            except asyncio.QueueEmpty:
-                pass
             queue.put_nowait(
                 {
                     "type": "task-overflow",

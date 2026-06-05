@@ -1,17 +1,18 @@
-from sqlalchemy.orm import Session
-from typing import List, Optional, Iterable
+from typing import Iterable, List
 from uuid import UUID
+
+from sqlalchemy.orm import Session
 
 from app.models import Course, User
 from app.schemas import CourseCreate, CourseUpdate
 
 
-def get_course(db: Session, course_id: UUID) -> Optional[Course]:
+def get_course(db: Session, course_id: UUID) -> Course | None:
     """Get course by ID"""
     return db.query(Course).filter(Course.courseId == course_id).first()
 
 
-def get_courses(db: Session, skip: int = 0, limit: int = 100) -> List[Course]:
+def get_courses(db: Session, skip: int = 0, limit: int = 100) -> list[Course]:
     """Get all courses"""
     return db.query(Course).offset(skip).limit(limit).all()
 
@@ -25,7 +26,7 @@ def create_course(db: Session, course: CourseCreate) -> Course:
     return db_course
 
 
-def update_course(db: Session, course_id: UUID, course_update: CourseUpdate) -> Optional[Course]:
+def update_course(db: Session, course_id: UUID, course_update: CourseUpdate) -> Course | None:
     """Update course information"""
     db_course = get_course(db, course_id)
     if not db_course:

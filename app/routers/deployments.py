@@ -1,41 +1,37 @@
-from fastapi import APIRouter, Depends, HTTPException, status, Request, Response
-from fastapi.responses import StreamingResponse, JSONResponse
-from sqlalchemy.orm import Session
-from typing import List, Optional, AsyncIterator
-from uuid import UUID
 import asyncio
 import json
 import logging
+from collections.abc import AsyncIterator
+from uuid import UUID
 
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
+from fastapi.responses import JSONResponse, StreamingResponse
+from sqlalchemy.orm import Session
+
+from app.crud import deployments as crud_deployments
+from app.crud import locks as crud_locks
+from app.crud import openstack_credentials as crud_openstack_credentials
+from app.crud import teams as crud_teams
 from app.database import get_db
-from app.models import TaskType, TaskStatus, User, UserRole
+from app.models import TaskStatus, TaskType, User, UserRole
 from app.schemas import (
     DeploymentCreate,
-    DeploymentResponse,
-    DeploymentWithRelations,
     DeploymentDetail,
-    DeploymentTeamResponse,
-    DeploymentTeamMember,
-    TaskSummary,
     DeploymentOutputs,
+    DeploymentResponse,
+    DeploymentTeamMember,
+    DeploymentTeamResponse,
+    TaskSummary,
 )
+from app.services import deployment_notifier
+from app.services import task_service as task_service_module
+from app.services.deployment_pubsub import pubsub
 from app.utils.keycloak_auth import get_current_user_keycloak
 from app.utils.permissions import (
     ensure_deployment_access,
     ensure_deployment_owner_view,
     is_deployment_owner_view,
 )
-from app.crud import deployments as crud_deployments, teams as crud_teams
-from app.crud import locks as crud_locks
-from app.crud import openstack_credentials as crud_openstack_credentials
-from app.crud import tasks as crud_tasks
-from app.services import task_service as task_service_module
-from app.services.deployment_pubsub import pubsub
-from app.services import deployment_notifier
-# Lifecycle gating used to live here behind separate destroy/delete
-# endpoints. The unified DELETE endpoint below handles the matrix
-# inline (it's exactly two branches now), but the module stays — it's
-# the home for the Pause/Resume gating once those land.
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -44,12 +40,12 @@ router = APIRouter()
 # ----------------------------------------------------------------
 # GET ALL DEPLOYMENTS
 # ----------------------------------------------------------------
-@router.get("/", response_model=List[DeploymentResponse])
+@router.get("/", response_model=list[DeploymentResponse])
 def list_deployments(
     skip: int = 0,
     limit: int = 100,
-    app_id: Optional[UUID] = None,
-    status_filter: Optional[str] = None,
+    app_id: UUID | None = None,
+    status_filter: str | None = None,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user_keycloak)
 ):
@@ -84,7 +80,7 @@ def list_deployments(
             app_id=app_id,
             status=status_filter,
         )
-    
+
     # Enrich with status and created_at from tasks
     result = []
     for deployment in deployments:
@@ -97,7 +93,7 @@ def list_deployments(
                 user_input_var_parsed = json.loads(deployment.userInputVar)
             except json.JSONDecodeError:
                 user_input_var_parsed = None
-        
+
         result.append(DeploymentResponse(
             deploymentId=deployment.deploymentId,
             name=deployment.name,
@@ -108,7 +104,7 @@ def list_deployments(
             status=status_value,
             created_at=created_at,
         ))
-    
+
     return result
 
 
@@ -136,7 +132,7 @@ def get_deployment(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Deployment not found"
         )
-    
+
     # Check access permission
     ensure_deployment_access(deployment, current_user, db)
 
@@ -144,7 +140,7 @@ def get_deployment(
     latest_task = crud_deployments.get_latest_task(db, deployment_id)
     task_summary = None
     logs = None
-    
+
     if latest_task:
         task_summary = TaskSummary(
             taskId=latest_task.taskId,
@@ -158,7 +154,7 @@ def get_deployment(
         )
         if include_logs:
             logs = latest_task.logs
-    
+
     # Get teams with members. The owner view sees every team and
     # every member. The member view only sees their own team(s) so
     # they can't browse who else has access to the deployment.
@@ -195,11 +191,11 @@ def get_deployment(
     else:
         outputs = None
         logs = None
-    
+
     # Get status and created_at from tasks
     status_value = crud_deployments.get_deployment_status(db, deployment_id)
     created_at = crud_deployments.get_deployment_created_at(db, deployment_id)
-    
+
     # Parse userInputVar JSON string back to dict if it exists
     user_input_var_parsed = None
     if deployment.userInputVar:
@@ -207,7 +203,7 @@ def get_deployment(
             user_input_var_parsed = json.loads(deployment.userInputVar)
         except json.JSONDecodeError:
             user_input_var_parsed = None
-    
+
     return DeploymentDetail(
         deploymentId=deployment.deploymentId,
         name=deployment.name,
@@ -583,12 +579,11 @@ def resend_access_credentials(
     # any team. Without this check a student in team A could trigger
     # a mail to anyone else's address, which is both privacy-leaky
     # and a tiny SMTP-amplification vector.
-    if not is_deployment_owner_view(deployment, current_user):
-        if str(user_id) != str(current_user.userId):
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Members may only resend their own access mail",
-            )
+    if not is_deployment_owner_view(deployment, current_user) and str(user_id) != str(current_user.userId):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Members may only resend their own access mail",
+        )
 
     try:
         sent = deployment_notifier.resend_user_access(
@@ -711,7 +706,7 @@ async def stream_deployment_events(
                     return
                 try:
                     event = await asyncio.wait_for(queue.get(), timeout=15.0)
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     yield b": keepalive\n\n"
                     continue
 
@@ -780,4 +775,4 @@ def _sse_frame(event_name: str, payload: dict) -> bytes:
     which keep everything on one line.
     """
     body = json.dumps(payload, default=str)
-    return f"event: {event_name}\ndata: {body}\n\n".encode("utf-8")
+    return f"event: {event_name}\ndata: {body}\n\n".encode()

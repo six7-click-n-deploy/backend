@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import base64
 from datetime import datetime
-from typing import Optional, Tuple
 from uuid import UUID
 
 from sqlalchemy.orm import Session
@@ -29,7 +28,7 @@ class NoCredentialError(Exception):
     """Raised when a deploy is attempted before the user has uploaded creds."""
 
 
-def get_for_user(db: Session, user_id: UUID) -> Optional[UserOpenStackCredential]:
+def get_for_user(db: Session, user_id: UUID) -> UserOpenStackCredential | None:
     return (
         db.query(UserOpenStackCredential)
         .filter(UserOpenStackCredential.userId == user_id)
@@ -41,7 +40,7 @@ def upsert(
     db: Session,
     user_id: UUID,
     payload: OpenStackCredentialUpsert,
-    validation_result: Tuple[bool, Optional[str]],
+    validation_result: tuple[bool, str | None],
 ) -> UserOpenStackCredential:
     """Create or update the user's credential row.
 
@@ -98,7 +97,7 @@ def upsert(
 def stamp_validation(
     db: Session,
     row: UserOpenStackCredential,
-    validation_result: Tuple[bool, Optional[str]],
+    validation_result: tuple[bool, str | None],
 ) -> UserOpenStackCredential:
     """Update validation metadata after a `/test` call without rotating ciphertext."""
     ok, error = validation_result

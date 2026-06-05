@@ -1,7 +1,7 @@
 import logging
 
-from fastapi import APIRouter, Depends, HTTPException, status
 import openstack
+from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
@@ -14,21 +14,25 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
+
 class QuotaItem(BaseModel):
     used: int
     limit: int
     available: int
     unit: str | None = None
 
+
 class ComputeQuotas(BaseModel):
     instances: QuotaItem
     vcpus: QuotaItem
     ram: QuotaItem
 
+
 class StorageQuotas(BaseModel):
     volumes: QuotaItem
     snapshots: QuotaItem
     gigabytes: QuotaItem
+
 
 class NetworkQuotas(BaseModel):
     floating_ips: QuotaItem
@@ -37,6 +41,7 @@ class NetworkQuotas(BaseModel):
     networks: QuotaItem
     ports: QuotaItem
     routers: QuotaItem
+
 
 class QuotaOverviewResponse(BaseModel):
     compute: ComputeQuotas
@@ -83,7 +88,7 @@ def _get_openstack_conn_for_user(db: Session, user: User):
 
 
 @router.get("/overview", response_model=QuotaOverviewResponse)
-async def get_quota_overview(
+def get_quota_overview(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user_keycloak),
 ):
@@ -91,18 +96,24 @@ async def get_quota_overview(
     Holt OpenStack Quota-Übersicht für Compute, Storage und Network
     aus dem **persönlichen** OpenStack-Projekt des Users.
 
+    Declared sync (not async) on purpose: every call inside hits the
+    OpenStack SDK with blocking network I/O. A sync def runs in
+    Starlette's threadpool, so a slow OpenStack response doesn't stall
+    the event loop and starve other endpoints (e.g. /dashboard/stats,
+    /users/me) that are mounted on the same dashboard view.
+
     Returns:
         QuotaOverviewResponse mit used/limit/available für alle Ressourcen
     """
     try:
         conn = _get_openstack_conn_for_user(db, current_user)
         project_id = conn.current_project_id
-        
+
         # === COMPUTE QUOTAS ===
         try:
             compute_limits = conn.compute.get_quota_set(project_id)
             compute_usage = conn.compute.get_limits()
-            
+
             compute = ComputeQuotas(
                 instances=QuotaItem(
                     used=getattr(compute_usage.absolute, 'total_instances_used', 0),
@@ -124,13 +135,13 @@ async def get_quota_overview(
         except Exception:
             logger.exception("Failed to fetch compute quotas for user")
             raise HTTPException(status_code=500, detail="Failed to fetch compute quotas")
-        
+
         # === STORAGE QUOTAS ===
         volume_limits = conn.volume.get_quota_set(project_id)
         volumes = list(conn.volume.volumes())
         snapshots = list(conn.volume.snapshots())
         total_gb_used = sum(v.size for v in volumes)
-        
+
         storage = StorageQuotas(
             volumes=QuotaItem(
                 used=len(volumes),
@@ -149,23 +160,23 @@ async def get_quota_overview(
                 unit="GB"
             )
         )
-        
+
         # === NETWORK QUOTAS ===
         network_limits = conn.network.get_quota(project_id)
-        
+
         # Zähle tatsächliche Ressourcen-Nutzung
         floating_ips_used = len(list(conn.network.ips()))
         security_groups_used = len(list(conn.network.security_groups()))
         networks_used = len(list(conn.network.networks()))
         ports_used = len(list(conn.network.ports()))
         routers_used = len(list(conn.network.routers()))
-        
+
         # Security Group Rules über alle Security Groups zählen
         sg_rules_used = sum(
             len(list(conn.network.security_group_rules(security_group_id=sg.id)))
             for sg in conn.network.security_groups()
         )
-        
+
         network = NetworkQuotas(
             floating_ips=QuotaItem(
                 used=floating_ips_used,
@@ -198,7 +209,7 @@ async def get_quota_overview(
                 available=getattr(network_limits, 'router', 10) - routers_used
             )
         )
-        
+
         return QuotaOverviewResponse(compute=compute, storage=storage, network=network)
 
     except HTTPException:
