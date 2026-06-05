@@ -14,6 +14,7 @@ from app.routers import (
     dashboard,
     deployments,
     openstack_credentials,
+    openstack_resources,
     quotas,
     tasks,
     teams,
@@ -103,6 +104,14 @@ app.include_router(teams.router, prefix="/teams", tags=["Teams"])
 app.include_router(quotas.router, prefix="/quotas", tags=["Quotas"])
 app.include_router(dashboard.router, prefix="/dashboard", tags=["Dashboard"])
 app.include_router(openstack_credentials.router, tags=["OpenStack Credentials"])
+# Read-API für OpenStack-Resourcen (Networks, Flavors, Images, ...).
+# Wird vom Wizard für Value-Help-Dropdowns genutzt, damit User keine
+# UUIDs aus Horizon abtippen müssen.
+app.include_router(
+    openstack_resources.router,
+    prefix="/me/openstack/resources",
+    tags=["OpenStack Resources"],
+)
 
 
 # ----------------------------------------------------------------

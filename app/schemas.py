@@ -81,6 +81,18 @@ class CourseWithUsers(CourseResponse):
     model_config = ConfigDict(from_attributes=True)
 
 
+class CourseMembersUpdate(BaseModel):
+    """Body for bulk-adding members to a course.
+
+    Course membership lives on ``users.courseId``, so a "member" is
+    just a user-id whose FK we (re-)point to this course. Existing
+    enrollments on other courses are silently overwritten — the UI's
+    add-button is also a "move into this course" button; that's the
+    explicit semantics.
+    """
+    userIds: list[UUID] = []
+
+
 # ----------------------------------------------------------------
 # APP SCHEMAS
 # ----------------------------------------------------------------
