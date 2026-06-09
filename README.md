@@ -1,5 +1,7 @@
 # Backend Service
 
+[![Coverage](https://img.shields.io/endpoint?url=https://six7-click-n-deploy.github.io/backend/badge.json)](https://six7-click-n-deploy.github.io/backend/)
+
 > ⚠️ **Important**: This is the backend application code repository. For deployment and orchestration, use the [`deployment`](https://github.com/six7-click-n-deploy/deployment) repository.
 
 FastAPI backend service with authentication, Git operations, and Celery task queue integration.
