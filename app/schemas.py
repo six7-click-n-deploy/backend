@@ -114,9 +114,15 @@ class AppCreate(AppBase):
 
 
 class AppUpdate(BaseModel):
+    # ``git_link`` is intentionally NOT editable — once an app has
+    # deployments, changing the repo would make the existing version
+    # history inconsistent (old deployments still point at the old
+    # repo via tags, but ``apps.git_link`` would now resolve elsewhere).
+    # Unknown fields in the request body are silently ignored by
+    # Pydantic, and ``crud.apps.update_app`` excludes ``git_link``
+    # from its setattr loop as a defense-in-depth.
     name: str | None = None
     description: str | None = None
-    git_link: str | None = None
     # Same data-URL convention as ``AppCreate``. Pass ``""`` (empty
     # string) to explicitly clear the image; ``None`` (the default)
     # leaves it unchanged.
