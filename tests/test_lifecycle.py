@@ -6,11 +6,10 @@ fails loudly without having to spin up the whole stack.
 """
 import uuid
 from datetime import datetime
-from types import SimpleNamespace
 
 import pytest
 
-from app.models import App, Deployment, Task, TaskStatus, TaskType, User, UserRole
+from app.models import App, Deployment, Task, TaskStatus, TaskType, User
 from app.services import lifecycle as lifecycle_service
 from app.services.lifecycle import DeploymentAction
 
@@ -124,7 +123,7 @@ def test_in_flight_statuses_set_is_complete():
     access guard) stay in sync with ``_ALLOWED``.
     """
     expected = {"pending", "running", "destroying", "pausing", "resuming"}
-    assert lifecycle_service.IN_FLIGHT_STATUSES == expected
+    assert expected == lifecycle_service.IN_FLIGHT_STATUSES
     # Every in-flight status must NOT appear as an _ALLOWED key —
     # otherwise an action would be permitted while a task is running.
     for s in expected:

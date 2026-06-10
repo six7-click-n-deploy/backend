@@ -28,8 +28,12 @@ def _make_user(db, *, email="old@dhbw.de", first="Old", last="Name", kc_id="kc-1
 def test_refresh_picks_up_new_email(db):
     """Happy path — KC has a newer email than the DB row."""
     user = _make_user(db, email="old@dhbw.de", kc_id="kc-1")
+    # ``type(...)``-based instance with a ``get_user`` method. The
+    # underscore prefix on ``_self`` flags it as intentionally
+    # unused — Python still binds it to the instance, but ruff's
+    # ARG005 stays quiet.
     fake_admin = type("FakeAdmin", (), {
-        "get_user": lambda self, kid: {
+        "get_user": lambda _self, kid: {
             "id": kid,
             "email": "new@dhbw.de",
             "username": "testuser",
@@ -107,7 +111,7 @@ def test_refresh_preserves_role(db):
     db.commit()
 
     fake_admin = type("FakeAdmin", (), {
-        "get_user": lambda self, kid: {
+        "get_user": lambda _self, kid: {
             "id": kid,
             "email": "new@dhbw.de",
             "username": "testuser",

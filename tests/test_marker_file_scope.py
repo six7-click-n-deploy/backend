@@ -7,9 +7,9 @@ functions — no Git clone, no FastAPI app, no DB.
 import pytest
 
 from app.routers.apps import (
-    MarkerError,
     _FILE_SCOPES,
     _OS_TYPES,
+    MarkerError,
     _parse_marker,
     _parse_one_variable,
     _validate_file_var_shape,
@@ -156,7 +156,7 @@ def test_parse_one_variable_attaches_marker_error_for_type_mismatch():
         source="terraform",
     )
     assert "markerError" in out
-    assert "broken_files" == out["markerError"]["variable"]
+    assert out["markerError"]["variable"] == "broken_files"
     # The classic ``osType`` field must NOT be set when the marker
     # errored — the variable degrades to Free-Text on the frontend.
     assert "osType" not in out

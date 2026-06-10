@@ -15,11 +15,11 @@ import pytest
 from app.models import (
     App,
     Deployment,
+    OpenStackAuthType,
     Task,
     TaskStatus,
     TaskType,
     UserOpenStackCredential,
-    OpenStackAuthType,
 )
 
 
@@ -304,7 +304,6 @@ def test_resend_access_rejected_while_action_in_flight(
     pause is misleading at best (instances may be SHUTOFF or gone)
     and a tiny SMTP-amplification vector at worst.
     """
-    import json
     from app.models import Team
 
     deployment = _make_deployment_with_creds(

@@ -8,7 +8,6 @@ RabbitMQ.
 import base64
 import json
 import uuid
-from datetime import datetime
 from unittest.mock import patch
 
 import pytest
@@ -16,13 +15,10 @@ import pytest
 from app.models import (
     App,
     Deployment,
-    Task,
-    TaskStatus,
-    TaskType,
-    UserOpenStackCredential,
     OpenStackAuthType,
-    UserRole,
     User,
+    UserOpenStackCredential,
+    UserRole,
 )
 
 
@@ -330,9 +326,9 @@ def test_download_endpoint_member_403(
     # Spawn a second user (a student member of the deployment) and
     # rebind the auth dependency to them. The deployment has no team
     # mapping, so we attach the student via UserToDeployment.
-    from app.utils.keycloak_auth import get_current_user_keycloak
     from app.main import app as fastapi_app
     from app.models import UserToDeployment
+    from app.utils.keycloak_auth import get_current_user_keycloak
 
     student = User(
         userId=uuid.uuid4(),

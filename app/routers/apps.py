@@ -472,22 +472,20 @@ def _validate_file_var_shape(var_name: str, var_type: str, scope: str) -> None:
     a strict full parse would be a big dependency for one check.
     """
     type_normalised = (var_type or "").strip().lower().replace(" ", "")
-    if scope == "all":
-        if not type_normalised.startswith("map(object("):
-            raise MarkerError(
-                var_name,
-                f"marker ``@openstack:file:all`` erwartet HCL-Type "
-                f"``map(object({{name=string, content_b64=string, "
-                f"size=number, content_type=string}}))`` — angegeben: '{var_type}'",
-            )
-    elif scope in ("team", "user"):
-        if not type_normalised.startswith("map(map(object("):
-            raise MarkerError(
-                var_name,
-                f"marker ``@openstack:file:{scope}`` erwartet HCL-Type "
-                f"``map(map(object({{name=string, content_b64=string, "
-                f"size=number, content_type=string}})))`` — angegeben: '{var_type}'",
-            )
+    if scope == "all" and not type_normalised.startswith("map(object("):
+        raise MarkerError(
+            var_name,
+            f"marker ``@openstack:file:all`` erwartet HCL-Type "
+            f"``map(object({{name=string, content_b64=string, "
+            f"size=number, content_type=string}}))`` — angegeben: '{var_type}'",
+        )
+    if scope in ("team", "user") and not type_normalised.startswith("map(map(object("):
+        raise MarkerError(
+            var_name,
+            f"marker ``@openstack:file:{scope}`` erwartet HCL-Type "
+            f"``map(map(object({{name=string, content_b64=string, "
+            f"size=number, content_type=string}})))`` — angegeben: '{var_type}'",
+        )
 
 
 def _parse_one_variable(
