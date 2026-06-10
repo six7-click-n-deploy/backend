@@ -10,10 +10,13 @@ Status values follow ``crud_deployments.get_deployment_status``:
 
 * ``pending`` / ``running`` — a deploy task is in flight
 * ``success`` — deploy finished, resources live in OpenStack
-* ``failed`` — last task ended in error (deploy or destroy)
+* ``failed`` — last task ended in error (deploy / destroy / pause / resume)
 * ``cancelled`` — last task was revoked
 * ``destroying`` — a destroy task is in flight (synthetic)
 * ``destroyed`` — a destroy task finished successfully (synthetic)
+* ``pausing`` — a pause task is in flight (synthetic)
+* ``paused`` — a pause task finished successfully (synthetic)
+* ``resuming`` — a resume task is in flight (synthetic)
 """
 
 from __future__ import annotations
@@ -26,21 +29,45 @@ from app.crud import deployments as crud_deployments
 
 
 class DeploymentAction(str, Enum):
-    """Lifecycle actions a user can request.
-
-    Pause/resume are out of scope for now (see backend#36); the enum
-    keeps room for them so adding them later is just a matrix entry.
-    """
+    """Lifecycle actions a user can request."""
 
     DESTROY = "destroy"
     DELETE = "delete"
+    # Pause halts compute (``openstack server stop`` for every server
+    # in the deployment's terraform state). Volumes and networks stay,
+    # so resume restores the same instances byte-for-byte. Cheap to
+    # run (~seconds) and cheap to undo, unlike destroy.
+    PAUSE = "pause"
+    # Resume reverses pause. Only valid in the synthetic ``paused``
+    # state to keep the matrix unambiguous: a deployment can't be
+    # resumed if it was never paused.
+    RESUME = "resume"
+
+
+# Synthetic statuses where some kind of worker task is currently in
+# flight against the deployment. Every action endpoint must refuse
+# while the deployment is in any of these — otherwise we'd let the
+# user kick off a parallel destroy mid-deploy or a pause mid-resume,
+# which is exactly the partial-unique-index error we're trying to
+# avoid surfacing as a 500. Single Source of Truth so the various
+# routes (DELETE, /pause, /resume, resend-access) and the matrix
+# below stay in sync.
+IN_FLIGHT_STATUSES: frozenset[str] = frozenset({
+    "pending",
+    "running",
+    "destroying",
+    "pausing",
+    "resuming",
+})
 
 
 # Status → set of allowed actions. Anything not listed here gets the
 # empty set, which is the safe default: a status we don't recognise
 # should not allow any destructive action.
 _ALLOWED: dict[str, set[DeploymentAction]] = {
-    "success": {DeploymentAction.DESTROY},
+    # Deployed and running — owner can either tear it down or pause
+    # compute to free RAM/CPU quota for the OpenStack project.
+    "success": {DeploymentAction.DESTROY, DeploymentAction.PAUSE},
     # ``failed`` is the interesting case. The deploy may have created
     # *some* OpenStack resources before failing (e.g. plan succeeded but
     # apply broke half-way), so Destroy is offered to reconcile. If the
@@ -54,9 +81,32 @@ _ALLOWED: dict[str, set[DeploymentAction]] = {
     # ``soft_delete_deployment`` call (sub-second). The row is hidden
     # from the default queries before the user could click anything.
     "cancelled": {DeploymentAction.DELETE},
-    # pending / running / destroying — no action allowed: an active
-    # task is doing something with the resources, and the partial-unique
-    # index on ``tasks(deploymentId) WHERE status IN ('PENDING','RUNNING')``
+    # Paused — the obvious action is Resume, but Destroy stays
+    # available so the user doesn't have to first resume just to tear
+    # the deployment down. Terraform-destroy works fine against
+    # SHUTOFF instances.
+    "paused": {DeploymentAction.RESUME, DeploymentAction.DESTROY},
+    # Pause failed: the *deployment* is still running (only the
+    # stop-pass tripped). Allow PAUSE retry, RESUME (no-op when
+    # instances are still ACTIVE, but symmetrical and harmless),
+    # and DESTROY for the user who wants to give up.
+    "pause_failed": {
+        DeploymentAction.PAUSE,
+        DeploymentAction.RESUME,
+        DeploymentAction.DESTROY,
+    },
+    # Resume failed: the instances are SHUTOFF, the resume pass
+    # broke. Allow RESUME retry, PAUSE (idempotent, the SHUTOFF
+    # state is what pause aims for anyway), and DESTROY.
+    "resume_failed": {
+        DeploymentAction.RESUME,
+        DeploymentAction.PAUSE,
+        DeploymentAction.DESTROY,
+    },
+    # pending / running / destroying / pausing / resuming — no action
+    # allowed: an active task is doing something with the resources,
+    # and the partial-unique index on
+    # ``tasks(deploymentId) WHERE status IN ('PENDING','RUNNING')``
     # in the DB enforces this at insert time too.
 }
 
@@ -64,8 +114,10 @@ _ALLOWED: dict[str, set[DeploymentAction]] = {
 # allowed. Keys match the action; the message lists the statuses where
 # the action is valid.
 _REQUIRED_STATES: dict[DeploymentAction, str] = {
-    DeploymentAction.DESTROY: "success or failed",
+    DeploymentAction.DESTROY: "success, failed, paused, pause_failed or resume_failed",
     DeploymentAction.DELETE: "failed or cancelled",
+    DeploymentAction.PAUSE: "success, pause_failed or resume_failed",
+    DeploymentAction.RESUME: "paused, pause_failed or resume_failed",
 }
 
 

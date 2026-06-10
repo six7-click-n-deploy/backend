@@ -105,7 +105,20 @@ _OS_TYPES: set[str] = {
     "volume",
     "router",
     "availability_zone",
+    # ``file`` is a special pseudo-resource: it doesn't pick from a
+    # remote OpenStack API, it tells the wizard to render a file-upload
+    # widget and route the bytes into ``userInputVar.terraform`` so the
+    # template can drop them onto the VM via cloud-init ``write_files``.
+    # The mode slot carries the scope (``all``/``team``/``user``); the
+    # multi slot is reserved for future multi-file-per-slot support and
+    # must stay empty today (``:multi`` is rejected with a clear error).
+    "file",
 }
+
+# Allowed scope tokens for ``@openstack:file:<scope>``. Reuses the
+# mode slot of the marker grammar — keeps the regex shape unchanged
+# while teaching the parser to interpret the slot per-type.
+_FILE_SCOPES: set[str] = {"all", "team", "user"}
 
 # Resource-Kinds, die in OpenStack faktisch keine UUID haben oder
 # durchgängig namensbasiert adressiert werden — z.B. Keypairs (Nova
@@ -180,11 +193,12 @@ class MarkerError(ValueError):
 
 def _parse_marker(
     var_name: str, var_type: str, description: str
-) -> tuple[str | None, str | None, bool | None]:
+) -> tuple[str | None, str | None, bool | None, str | None]:
     """
     Parst den ``@openstack:<type>[:<mode>][:<multi>]``-Marker aus der
-    Description. Liefert ``(None, None, None)`` wenn KEIN Marker da ist
-    (das ist KEIN Fehler — die Variable wird dann als Free-Text gerendert).
+    Description. Liefert ``(None, None, None, None)`` wenn KEIN Marker
+    da ist (das ist KEIN Fehler — die Variable wird dann als Free-Text
+    gerendert).
 
     Multi-Marker-Verhalten: Findet die Funktion mehrere Marker, nimmt sie
     den ersten, dessen Type bekannt ist. Das ist absichtlich tolerant —
@@ -199,13 +213,17 @@ def _parse_marker(
         Type-Slot, Slot-Trenner mit Sonderzeichen statt ``:``)
       - widersprüchlichem Marker vs. HCL-Type (``:single`` mit
         ``type = list(...)`` oder ``:multi`` mit ``type = number``)
+      - file-spezifisch: ungültigem Scope (``@openstack:file:foo``) oder
+        nicht-leerem Multi-Slot (``@openstack:file:user:multi``).
 
-    Returns: (os_type, mode, multi). ``mode``/``multi`` können ``None``
-    bleiben (Slot ungesetzt) — die Defaults werden vom Caller über
-    ``_apply_defaults`` appliziert.
+    Returns: (os_type, mode, multi, scope). Genau einer von ``mode`` und
+    ``scope`` wird je nach Type befüllt — ``mode`` für die klassischen
+    OpenStack-Resourcen, ``scope`` für ``@openstack:file:<scope>``. Die
+    ungenutzten Felder bleiben ``None`` und die jeweils unzutreffenden
+    Defaults werden in ``_apply_defaults`` aufgesetzt.
     """
     if not description:
-        return (None, None, None)
+        return (None, None, None, None)
 
     # Vier+ Segmente sind nie legitim. Schnellt zuerst durch, BEVOR der
     # Haupt-Regex (der nach 3 Slots aufhört) das gar nicht mitkriegt.
@@ -230,7 +248,7 @@ def _parse_marker(
                 "``@openstack:<type>[:<mode>][:<multi>]`` mit Doppelpunkten "
                 "als Trenner und ohne Whitespace zwischen den Segmenten",
             )
-        return (None, None, None)
+        return (None, None, None, None)
 
     # Erster Marker mit BEKANNTEM Type gewinnt. Marker mit unbekanntem
     # Type werden übersprungen (toleriert): wenn Apps in der Description
@@ -264,6 +282,39 @@ def _parse_marker(
 
     _, raw_type, raw_mode, raw_multi = chosen
     os_type = raw_type.lower()
+
+    # File-Marker hat seine eigene Slot-Semantik: der Mode-Slot trägt
+    # den Scope (``all``/``team``/``user``), der Multi-Slot ist heute
+    # ungenutzt und MUSS leer bleiben. Wir handlen das hier separat,
+    # damit die generische Mode/Multi-Logik darunter unverändert bleibt
+    # und die normalen OpenStack-Resource-Types weiterhin sauber
+    # validiert werden.
+    if os_type == "file":
+        scope: str | None = None
+        if raw_mode is not None and raw_mode != "":
+            rs = raw_mode.lower()
+            if rs in _FILE_SCOPES:
+                scope = rs
+            else:
+                scope_suggestion = _closest_match(rs, _FILE_SCOPES)
+                hint = f"; meintest du '{scope_suggestion}'?" if scope_suggestion else ""
+                raise MarkerError(
+                    var_name,
+                    f"ungültiger scope '{raw_mode}'{hint} — erwartet "
+                    f"{sorted(_FILE_SCOPES)}",
+                )
+        # Multi-Slot ist heute reserviert; jeder explizite Wert
+        # (``:multi``/``:single``/Tippfehler) ist ein klarer Author-
+        # Fehler. Wir lehnen ihn mit Hint ab, damit das Feld später
+        # für Multi-File-pro-Slot-Support frei bleibt.
+        if raw_multi not in (None, ""):
+            raise MarkerError(
+                var_name,
+                f"@openstack:file akzeptiert keinen multi-Flag "
+                f"(angegeben: '{raw_multi}') — schreib den Marker als "
+                f"``@openstack:file:<scope>``",
+            )
+        return (os_type, None, None, scope)
 
     mode: str | None = None
     if raw_mode is not None:
@@ -343,7 +394,7 @@ def _parse_marker(
             "(eine list/set/tuple-Kollektion) — fixe einen der beiden",
         )
 
-    return (os_type, mode, multi)
+    return (os_type, mode, multi, None)
 
 
 def _apply_defaults(
@@ -400,6 +451,45 @@ def _line_number_at(content: str, char_index: int) -> int:
     return content.count("\n", 0, char_index) + 1
 
 
+def _validate_file_var_shape(var_name: str, var_type: str, scope: str) -> None:
+    """Verify a ``@openstack:file:<scope>``-marked variable has the
+    HCL type the wizard contract expects.
+
+    The contract — documented in the deploy/file-uploads design — is:
+
+    * ``scope = all``  → ``map(object({...}))``
+    * ``scope = team`` → ``map(map(object({...})))``
+    * ``scope = user`` → ``map(map(object({...})))``
+
+    The outer map keys content by upload-key (today always
+    ``"uploaded"``, reserved for future multi-file-per-slot). For
+    ``team``/``user`` the next layer keys by team name resp.
+    ``Team-User``-pair so the worker can route per-recipient bytes.
+
+    We don't try to parse HCL — we just check the prefix shape with
+    cheap string ops. False positives are unlikely (no real-world HCL
+    type accidentally starts with ``map(map(`` unless it is one) and
+    a strict full parse would be a big dependency for one check.
+    """
+    type_normalised = (var_type or "").strip().lower().replace(" ", "")
+    if scope == "all":
+        if not type_normalised.startswith("map(object("):
+            raise MarkerError(
+                var_name,
+                f"marker ``@openstack:file:all`` erwartet HCL-Type "
+                f"``map(object({{name=string, content_b64=string, "
+                f"size=number, content_type=string}}))`` — angegeben: '{var_type}'",
+            )
+    elif scope in ("team", "user"):
+        if not type_normalised.startswith("map(map(object("):
+            raise MarkerError(
+                var_name,
+                f"marker ``@openstack:file:{scope}`` erwartet HCL-Type "
+                f"``map(map(object({{name=string, content_b64=string, "
+                f"size=number, content_type=string}})))`` — angegeben: '{var_type}'",
+            )
+
+
 def _parse_one_variable(
     *,
     var_name: str,
@@ -450,7 +540,17 @@ def _parse_one_variable(
     # in EINER Variablen-Description darf nicht den gesamten Wizard
     # blockieren; der Fehler reist im Payload mit der Variablen mit.
     try:
-        os_type, raw_mode, raw_multi = _parse_marker(var_name, var_type, description)
+        os_type, raw_mode, raw_multi, scope = _parse_marker(var_name, var_type, description)
+        # File-Variablen haben eine harte Vertragsschnittstelle gegenüber
+        # cloud-init: der Wizard muss wissen, ob er einen Single-Slot
+        # (scope=all), eine Map über Teams oder eine Map über User
+        # rendern soll. Die HCL-Type-Schachtelung muss zum Scope
+        # passen, sonst würde Terraform den Decode beim Apply
+        # zurückweisen — wir fangen das hier ab und geben dem Autor
+        # eine klare Fehlermeldung statt eines stack-traces im
+        # Worker-Log.
+        if os_type == "file":
+            _validate_file_var_shape(var_name, var_type, scope or "all")
     except MarkerError as exc:
         line = _line_number_at(file_content, var_block_offset)
         var_info["markerError"] = {
@@ -461,10 +561,20 @@ def _parse_one_variable(
         return var_info
 
     if os_type:
-        mode, multi = _apply_defaults(os_type, raw_mode, raw_multi, var_type)
-        var_info["osType"] = os_type
-        var_info["osMode"] = mode
-        var_info["osMulti"] = multi
+        if os_type == "file":
+            # File-Variablen sind weder mode- noch multi-driven; der
+            # Wizard rendert eine FileDropZone, nicht den Resource-
+            # Picker. ``osMode`` und ``osMulti`` werden bewusst nicht
+            # gesetzt, damit das Frontend eine fehlende Belegung als
+            # „nicht-anwendbar" liest statt einen Default-Wert zu
+            # erfinden.
+            var_info["osType"] = os_type
+            var_info["osScope"] = scope or "all"
+        else:
+            mode, multi = _apply_defaults(os_type, raw_mode, raw_multi, var_type)
+            var_info["osType"] = os_type
+            var_info["osMode"] = mode
+            var_info["osMulti"] = multi
 
     return var_info
 

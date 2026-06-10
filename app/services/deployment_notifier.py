@@ -13,14 +13,14 @@ membership from the DB. The output shape is documented inline below
 so a future template change doesn't have to re-discover it from a
 real run.
 
-DB-as-truth: team members are synced from Keycloak by the
-``/users/search`` endpoint every time the wizard's member picker
-queries it (``sync_user_from_keycloak`` is called per match). By the
-time a deployment row exists, its members' email/firstName/lastName
-are already up-to-date. We trust the DB here and don't re-query
-Keycloak before sending — the mail flow stays simple, and the only
-drift window (user changes their KC email between wizard pick and
-notify) is the same window the rest of the app accepts.
+Recipient freshness: every recipient is pulled from Keycloak
+(``refresh_user_from_keycloak``) right before the mail is composed.
+A deploy can run for many minutes between the wizard pick and the
+notification, and the team member's address may have changed in the
+meantime — refusing to refresh would silently send credentials to a
+stale address. The refresh is best-effort: when Keycloak is down or
+the user was deleted upstream we fall back to the DB record so a
+flaky identity provider can't tank the entire notification flow.
 
 Failures are logged at the call site and never bubble up — sending
 mail is best-effort, the deploy itself is already done.
@@ -39,6 +39,7 @@ from app.config import settings
 from app.crud import deployments as crud_deployments
 from app.models import App, Deployment, Task, TaskStatus, TaskType, Team, User
 from app.services import email_service
+from app.utils.keycloak_auth import refresh_user_from_keycloak
 
 logger = logging.getLogger(__name__)
 
@@ -243,6 +244,7 @@ def _team_members(db: Session, team: Team) -> list[User]:
 
 def _send_user_mail(
     *,
+    db: Session,
     user: User,
     teammates: list[User],
     team_name: str,
@@ -250,6 +252,24 @@ def _send_user_mail(
     app: App,
     access: dict[str, Any],
 ) -> None:
+    # Re-pull from Keycloak immediately before composing the mail.
+    # The DB row may have been written minutes (or longer) ago when
+    # the wizard picker first stored the membership; meanwhile the
+    # user might have changed their address upstream. Refreshing here
+    # keeps the recipient honest. ``refresh_user_from_keycloak`` is
+    # best-effort: if KC is unreachable the helper logs and returns
+    # the DB row, so the mail still goes out to the last-known-good
+    # address rather than failing entirely.
+    #
+    # The notify caller already pre-refreshed every team member to
+    # keep the ``teammates`` list consistent. We refresh the recipient
+    # once more here because this helper is also called from the
+    # ``resend_user_access`` path, which doesn't run that pre-loop —
+    # making the refresh a property of the sender keeps both call
+    # sites honest. The extra KC hit on the notify path is one
+    # roundtrip per user mail, which is negligible compared to the
+    # SMTP work that follows.
+    user = refresh_user_from_keycloak(db, user)
     ctx = {
         "user": user,
         "user_display_name": _display_name(user),
@@ -277,11 +297,16 @@ def _send_user_mail(
 
 def _send_owner_mail(
     *,
+    db: Session,
     owner: User,
     deployment: Deployment,
     app: App,
     teams_payload: list[dict[str, Any]],
 ) -> None:
+    # Same refresh contract as ``_send_user_mail`` — the owner of a
+    # deployment is also a Keycloak user whose address may have
+    # changed since the deployment was created.
+    owner = refresh_user_from_keycloak(db, owner)
     ctx = {
         "owner": owner,
         "owner_display_name": _display_name(owner),
@@ -340,6 +365,15 @@ def notify_deployment_succeeded(
     teams_payload: list[dict[str, Any]] = []
     for team in deployment.teams or []:
         members = _team_members(db, team)
+        # Refresh every team member from Keycloak up front so the
+        # teammates section in each per-user mail and the owner
+        # summary's member list both reflect the current upstream
+        # records, not whatever was on file when the deployment was
+        # created. ``_send_user_mail`` does its own refresh of the
+        # specific recipient too, but doing it once here keeps the
+        # ``teammates`` rendering consistent and avoids N redundant
+        # KC roundtrips per user mail.
+        members = [refresh_user_from_keycloak(db, m) for m in members]
         member_payload: list[dict[str, Any]] = []
         for member in members:
             access = _access_for_user(terraform_outputs, team.name, member)
@@ -364,6 +398,7 @@ def notify_deployment_succeeded(
             # inside ``email_service.send_email``.
             try:
                 _send_user_mail(
+                    db=db,
                     user=member,
                     teammates=members,
                     team_name=team.name,
@@ -387,6 +422,7 @@ def notify_deployment_succeeded(
     # resolve.
     try:
         _send_owner_mail(
+            db=db,
             owner=owner,
             deployment=deployment,
             app=app,
@@ -482,6 +518,7 @@ def resend_user_access(
 
     try:
         _send_user_mail(
+            db=db,
             user=user,
             teammates=members,
             team_name=team.name,

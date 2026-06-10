@@ -31,3 +31,27 @@ def acquire_user_xact_lock(db: Session, user_id: UUID) -> None:
         text("SELECT pg_advisory_xact_lock(hashtext(:uid))"),
         {"uid": str(user_id)},
     )
+
+
+def acquire_deployment_xact_lock(db: Session, deployment_id: UUID) -> None:
+    """Per-deployment advisory lock — serialises lifecycle dispatch.
+
+    Used by every endpoint that prepares a new lifecycle task
+    (destroy / pause / resume) so two concurrent requests on the
+    *same* deployment can never both pass the
+    ``ensure_action_allowed`` matrix check, both call
+    ``prepare_task_in_tx``, and one ends up surfacing a raw
+    ``IntegrityError`` from the partial unique index instead of a
+    clean 409.
+
+    Uses a separate keyspace from ``acquire_user_xact_lock`` —
+    ``pg_advisory_xact_lock(int4, int4)`` takes two ints; we pin the
+    first to ``1`` for the deployment namespace and hash the UUID
+    into the second slot. Same caveat about 32-bit hash collisions
+    applies (worst case: two unrelated deployments share a bucket
+    and serialize, no correctness loss).
+    """
+    db.execute(
+        text("SELECT pg_advisory_xact_lock(1, hashtext(:did))"),
+        {"did": str(deployment_id)},
+    )
