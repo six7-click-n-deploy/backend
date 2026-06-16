@@ -4,7 +4,7 @@ from uuid import UUID
 from fastapi import HTTPException, status
 from sqlalchemy.orm import Session
 
-from app.models import App, AppVersionApproval, AppVersionApprovalStatus
+from app.models import AppVersionApproval, AppVersionApprovalStatus
 
 
 def submit_version(

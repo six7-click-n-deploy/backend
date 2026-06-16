@@ -7,15 +7,14 @@ from app.crud import app_version_approvals as crud_approvals
 from app.crud import apps as crud_apps
 from app.database import get_db
 from app.models import User
+from app.routers.apps import _serialize_app
 from app.schemas import (
     AppResponse,
     AppVersionApprovalDecision,
     AppVersionApprovalResponse,
     AppVersionApprovalWithApp,
 )
-from app.utils.keycloak_auth import get_current_user_keycloak
 from app.utils.permissions import get_current_admin
-from app.routers.apps import _serialize_app
 
 router = APIRouter()
 
@@ -113,7 +112,7 @@ def deactivate_app(
     the store immediately. Does not delete the app or its deployments."""
     from app.schemas import AppUpdate
 
-    app = _require_app(db, app_id)
+    _require_app(db, app_id)
     updated = crud_apps.update_app(db, app_id, AppUpdate(is_private=True))
     return _serialize_app(updated)
 

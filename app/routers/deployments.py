@@ -8,8 +8,8 @@ from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from fastapi.responses import JSONResponse, StreamingResponse
 from sqlalchemy.orm import Session
 
-from app.crud import apps as crud_apps
 from app.crud import app_version_approvals as crud_approvals
+from app.crud import apps as crud_apps
 from app.crud import deployments as crud_deployments
 from app.crud import locks as crud_locks
 from app.crud import openstack_credentials as crud_openstack_credentials

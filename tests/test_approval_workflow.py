@@ -13,7 +13,6 @@ import pytest
 from app.crud import app_version_approvals as crud_approvals
 from tests.conftest import create_app_in_db
 
-
 # ================================================================
 # APP LISTING VISIBILITY
 # ================================================================

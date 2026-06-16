@@ -1,3 +1,4 @@
+import contextlib
 import logging
 import os
 import re
@@ -7,11 +8,18 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
-from app.crud import apps as crud_apps
 from app.crud import app_version_approvals as crud_approvals
+from app.crud import apps as crud_apps
 from app.database import get_db
 from app.models import User, UserRole
-from app.schemas import AppCreate, AppResponse, AppUpdate, AppVersionApprovalResponse, AppVersionApprovalSubmit, AppWithVersions
+from app.schemas import (
+    AppCreate,
+    AppResponse,
+    AppUpdate,
+    AppVersionApprovalResponse,
+    AppVersionApprovalSubmit,
+    AppWithVersions,
+)
 from app.services.git_service import git_service
 from app.utils.app_image import build_image_data_url, parse_image_data_url
 from app.utils.keycloak_auth import get_current_user_keycloak
@@ -580,11 +588,10 @@ def get_app(
         str(app.userId) == str(current_user.userId)
         or current_user.role in (UserRole.TEACHER, UserRole.ADMIN)
     )
-    if not is_owner_or_staff:
-        if app.is_private or not crud_approvals.has_any_approved_version(db, app.appId):
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="You don't have permission to access this resource"
+    if not is_owner_or_staff and (app.is_private or not crud_approvals.has_any_approved_version(db, app.appId)):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You don't have permission to access this resource"
             )
 
     # Fetch versions if git_link exists. Skipped for soft-deleted apps
@@ -751,10 +758,8 @@ def create_app(
             for v in versions:
                 tag = v.get("version") or v.get("releaseTag") or v.get("tag")
                 if tag:
-                    try:
+                    with contextlib.suppress(Exception):
                         crud_approvals.submit_version(db, app_id=db_app.appId, version_tag=tag)
-                    except Exception:
-                        pass  # skip duplicates or individual failures silently
         except Exception as e:
             logger.warning(f"Could not auto-submit versions for app {db_app.appId}: {e}")
 
