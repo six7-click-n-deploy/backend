@@ -8,9 +8,10 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
 from app.crud import apps as crud_apps
+from app.crud import app_version_approvals as crud_approvals
 from app.database import get_db
-from app.models import User
-from app.schemas import AppCreate, AppResponse, AppUpdate, AppWithVersions
+from app.models import User, UserRole
+from app.schemas import AppCreate, AppResponse, AppUpdate, AppVersionApprovalResponse, AppVersionApprovalSubmit, AppWithVersions
 from app.services.git_service import git_service
 from app.utils.app_image import build_image_data_url, parse_image_data_url
 from app.utils.keycloak_auth import get_current_user_keycloak
@@ -536,15 +537,16 @@ def list_apps(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user_keycloak)
 ):
-    """
-    Get all apps owned by the current user.
+    """List apps visible to the current user.
 
-    Listing is always scoped to the requester regardless of role — teachers
-    and admins still only see their own apps in the index. Cross-user access
-    happens explicitly through `GET /apps/{app_id}`, which is gated by
-    `ensure_resource_access`.
+    - Admins and teachers see all non-deleted apps.
+    - Regular users see their own apps plus public apps that have at
+      least one approved version.
     """
-    apps = crud_apps.get_apps(db, skip=skip, limit=limit, user_id=current_user.userId)
+    if current_user.role in (UserRole.ADMIN, UserRole.TEACHER):
+        apps = crud_apps.get_apps(db, skip=skip, limit=limit)
+    else:
+        apps = crud_apps.get_visible_apps(db, current_user.userId, skip=skip, limit=limit)
     return [_serialize_app(a) for a in apps]
 
 
@@ -571,15 +573,40 @@ def get_app(
             detail="App not found"
         )
 
-    # Check access permission
-    ensure_resource_access(app.userId, current_user)
+    # Check access permission:
+    # - Owner, Teacher, Admin: always allowed
+    # - Everyone else: only if app is public AND has at least one approved version
+    is_owner_or_staff = (
+        str(app.userId) == str(current_user.userId)
+        or current_user.role in (UserRole.TEACHER, UserRole.ADMIN)
+    )
+    if not is_owner_or_staff:
+        if app.is_private or not crud_approvals.has_any_approved_version(db, app.appId):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="You don't have permission to access this resource"
+            )
 
     # Fetch versions if git_link exists. Skipped for soft-deleted apps
     # — listing versions is a "what could I deploy" affordance and the
     # answer is "nothing", you already deleted this app.
     if app.git_link and app.deleted_at is None:
         try:
-            app.versions = git_service.get_versions(app.git_link)
+            all_versions = git_service.get_versions(app.git_link)
+            if is_owner_or_staff:
+                # Owner/Teacher/Admin see all Git tags
+                app.versions = all_versions
+            else:
+                # Everyone else only sees approved version tags
+                approved_tags = {
+                    a.version_tag
+                    for a in crud_approvals.get_approvals_for_app(db, app.appId)
+                    if a.status == "approved"
+                }
+                app.versions = [
+                    v for v in all_versions
+                    if (v if isinstance(v, str) else v.get("version") or v.get("releaseTag") or v.get("tag", "")) in approved_tags
+                ]
         except Exception as e:
             app.versions = []
             import logging
@@ -716,6 +743,21 @@ def create_app(
     db_app = crud_apps.create_app(db, app, current_user.userId)
     if image_bytes is not None:
         db_app = crud_apps.set_app_image(db, db_app.appId, image_bytes, image_mime)
+
+    # Auto-submit all tags for review if requested (public apps only)
+    if app.submit_all_versions and not app.is_private and app.git_link:
+        try:
+            versions = git_service.get_versions(app.git_link)
+            for v in versions:
+                tag = v.get("version") or v.get("releaseTag") or v.get("tag")
+                if tag:
+                    try:
+                        crud_approvals.submit_version(db, app_id=db_app.appId, version_tag=tag)
+                    except Exception:
+                        pass  # skip duplicates or individual failures silently
+        except Exception as e:
+            logger.warning(f"Could not auto-submit versions for app {db_app.appId}: {e}")
+
     return _serialize_app(db_app)
 
 
@@ -729,9 +771,11 @@ def update_app(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user_keycloak)
 ):
-    """
-    Update an app
-    - **Owner or Teacher/Admin** can update
+    """Update an app.
+
+    ``git_link`` is immutable after creation — sending it in the body
+    returns HTTP 400. Use ``is_private`` to toggle visibility.
+    Owner or Teacher/Admin only.
     """
     app = crud_apps.get_app(db, app_id)
     if not app:
@@ -743,11 +787,6 @@ def update_app(
     # Check access permission
     ensure_resource_access(app.userId, current_user)
 
-    # Image is set separately because the AppUpdate.image is a
-    # data-URL string and update_app excludes it from the bulk
-    # ``setattr`` loop. ``image=None`` means "leave unchanged"
-    # (Pydantic ``exclude_unset`` semantics) — to actively clear
-    # the image, send ``image=""``.
     image_was_provided = "image" in app_update.model_fields_set
     image_bytes, image_mime = (None, None)
     if image_was_provided:
@@ -757,6 +796,96 @@ def update_app(
     if image_was_provided:
         updated_app = crud_apps.set_app_image(db, app_id, image_bytes, image_mime)
     return _serialize_app(updated_app)
+
+
+# ----------------------------------------------------------------
+# SUBMIT VERSION FOR REVIEW
+# ----------------------------------------------------------------
+@router.post(
+    "/{app_id}/versions/{version_tag}/submit",
+    response_model=AppVersionApprovalResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+def submit_version(
+    app_id: UUID,
+    version_tag: str,
+    body: AppVersionApprovalSubmit,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user_keycloak),
+):
+    """Submit a specific version tag for admin review.
+
+    Only the app owner can submit versions. Admins and teachers may
+    submit on behalf of any app via the admin router instead.
+    A REJECTED version can be resubmitted; PENDING and APPROVED cannot.
+    """
+    app = crud_apps.get_app(db, app_id)
+    if not app:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="App not found")
+
+    ensure_resource_access(app.userId, current_user)
+
+    if not app.git_link:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="App has no git repository configured",
+        )
+
+    return crud_approvals.submit_version(
+        db, app_id=app_id, version_tag=version_tag, diff_url=body.diff_url
+    )
+
+
+# ----------------------------------------------------------------
+# WITHDRAW VERSION SUBMISSION
+# ----------------------------------------------------------------
+@router.delete(
+    "/{app_id}/versions/{version_tag}/submit",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+def withdraw_version(
+    app_id: UUID,
+    version_tag: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user_keycloak),
+):
+    """Withdraw a PENDING version submission.
+
+    Only the app owner can withdraw. Deletes the approval entry so
+    the version appears as unsubmitted again.
+    """
+    app = crud_apps.get_app(db, app_id)
+    if not app:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="App not found")
+
+    ensure_resource_access(app.userId, current_user)
+    crud_approvals.withdraw(db, app_id=app_id, version_tag=version_tag)
+    return None
+
+
+# ----------------------------------------------------------------
+# GET VERSION APPROVALS FOR APP
+# ----------------------------------------------------------------
+@router.get(
+    "/{app_id}/versions",
+    response_model=list[AppVersionApprovalResponse],
+)
+def list_version_approvals(
+    app_id: UUID,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user_keycloak),
+):
+    """List all version approval entries for an app.
+
+    Owner, teacher, and admin can view this list.
+    """
+    app = crud_apps.get_app(db, app_id, include_deleted=True)
+    if not app:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="App not found")
+
+    ensure_resource_access(app.userId, current_user)
+
+    return crud_approvals.get_approvals_for_app(db, app_id)
 
 
 # ----------------------------------------------------------------

@@ -2,7 +2,7 @@ import enum
 import uuid
 from datetime import datetime
 
-from sqlalchemy import Column, DateTime, Enum, ForeignKey, Integer, LargeBinary, String, Text
+from sqlalchemy import Boolean, Column, DateTime, Enum, ForeignKey, Integer, LargeBinary, String, Text, UniqueConstraint
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import relationship
 
@@ -16,6 +16,12 @@ class UserRole(str, enum.Enum):
     STUDENT = "student"
     TEACHER = "teacher"
     ADMIN = "admin"
+
+
+class AppVersionApprovalStatus(str, enum.Enum):
+    PENDING = "pending"
+    APPROVED = "approved"
+    REJECTED = "rejected"
 
 
 class TaskType(str, enum.Enum):
@@ -95,6 +101,7 @@ class App(Base):
     image = Column(LargeBinary, nullable=True)  # raw bytes of the uploaded logo
     image_mime = Column(String(64), nullable=True)  # e.g. "image/png" — needed to build a data-URL on read
     git_link = Column(String, nullable=True)
+    is_private = Column(Boolean, nullable=False, default=False)
     userId = Column(UUID(as_uuid=True), ForeignKey("users.userId"), nullable=False, index=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     # Soft-delete marker. When set, the app is hidden from default
@@ -107,6 +114,12 @@ class App(Base):
     # Relationships
     user = relationship("User", back_populates="apps")
     deployments = relationship("Deployment", back_populates="app")
+    version_approvals = relationship(
+        "AppVersionApproval",
+        back_populates="app",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+    )
 
 
 # ----------------------------------------------------------------
@@ -304,3 +317,42 @@ class UserOpenStackCredential(Base):
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
     user = relationship("User", back_populates="openstack_credential")
+
+
+# ----------------------------------------------------------------
+# APP VERSION APPROVAL MODEL
+# ----------------------------------------------------------------
+class AppVersionApproval(Base):
+    __tablename__ = "app_version_approvals"
+
+    approvalId = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    appId = Column(
+        UUID(as_uuid=True),
+        ForeignKey("apps.appId", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    version_tag = Column(String, nullable=False)
+    status = Column(
+        Enum(AppVersionApprovalStatus),
+        nullable=False,
+        default=AppVersionApprovalStatus.PENDING,
+    )
+    diff_url = Column(String, nullable=True)
+    rejection_reason = Column(Text, nullable=True)
+    reviewed_by = Column(
+        UUID(as_uuid=True),
+        ForeignKey("users.userId", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    reviewed_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint("appId", "version_tag", name="uq_app_version_approval"),
+    )
+
+    # Relationships
+    app = relationship("App", back_populates="version_approvals")
+    reviewer = relationship("User", foreign_keys=[reviewed_by])
