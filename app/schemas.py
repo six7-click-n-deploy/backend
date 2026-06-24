@@ -202,9 +202,38 @@ class DeploymentBase(BaseModel):
     appId: UUID
 
 
+class DeploymentFileUpload(BaseModel):
+    """Single file uploaded by the teacher in the deploy wizard.
+
+    Carries the original filename + base64 payload + metadata. The
+    backend persists this verbatim into ``userInputVar.terraform``
+    keyed by the variable name and (for team/user scope) the
+    recipient key, so the worker can pass it through to terraform
+    as a typed map and the cloud-init template can decode it back
+    into ``write_files`` entries.
+
+    ``content_b64`` MUST be standard (RFC 4648) base64 with optional
+    padding. The router decodes once to validate; the value sent to
+    Terraform stays base64 so cloud-init's ``encoding: b64`` directive
+    can write it without further transformation.
+    """
+    name: str
+    content_b64: str
+    size: int
+    content_type: str | None = None
+
+
 class DeploymentCreate(DeploymentBase):
     releaseTag: str | None = None
     userInputVar: dict[str, Any] | None = None
+    # Files-map keyed by ``@openstack:file:<scope>``-marked variable
+    # name. Inner key:
+    #   * scope = all  → exactly one inner key, conventionally "all"
+    #   * scope = team → one entry per team name
+    #   * scope = user → one entry per ``Team-User`` composite key
+    # The backend doesn't auto-route — what the wizard puts in here
+    # ends up 1:1 in the Terraform variable.
+    files: dict[str, dict[str, DeploymentFileUpload]] | None = None
     teams: list[Team] = []
 
 

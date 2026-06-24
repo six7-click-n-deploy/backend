@@ -1,4 +1,6 @@
 import asyncio
+import base64
+import binascii
 import json
 import logging
 from collections.abc import AsyncIterator
@@ -26,6 +28,7 @@ from app.schemas import (
     TaskSummary,
 )
 from app.services import deployment_notifier
+from app.services import lifecycle as lifecycle_service
 from app.services import task_service as task_service_module
 from app.services.deployment_pubsub import pubsub
 from app.utils.keycloak_auth import get_current_user_keycloak
@@ -94,16 +97,19 @@ def list_deployments(
 
     result = []
     for deployment in deployments:
-        latest_status, latest_type, first_created_at = task_summary.get(
-            deployment.deploymentId, (None, None, None)
-        )
-        status_value = crud_deployments.derive_status(latest_status, latest_type)
-
-        # Parse userInputVar JSON string back to dict if it exists
+        status_value = crud_deployments.get_deployment_status(db, deployment.deploymentId)
+        created_at = crud_deployments.get_deployment_created_at(db, deployment.deploymentId)
+        # Parse userInputVar JSON string back to dict if it exists.
+        # File uploads are stripped down to metadata here so the list
+        # view doesn't ship megabytes of base64 to the browser; the
+        # detail endpoint follows the same rule, and the dedicated
+        # download route is the only path that returns raw bytes.
         user_input_var_parsed = None
         if deployment.userInputVar:
             try:
-                user_input_var_parsed = json.loads(deployment.userInputVar)
+                user_input_var_parsed = _strip_file_vars_from_user_input(
+                    json.loads(deployment.userInputVar)
+                )
             except json.JSONDecodeError:
                 user_input_var_parsed = None
 
@@ -209,11 +215,15 @@ def get_deployment(
     status_value = crud_deployments.get_deployment_status(db, deployment_id)
     created_at = crud_deployments.get_deployment_created_at(db, deployment_id)
 
-    # Parse userInputVar JSON string back to dict if it exists
+    # Parse userInputVar JSON string back to dict if it exists. Same
+    # strip-file-bytes treatment as the list endpoint — base64
+    # payloads are surfaced via the download route, not the JSON view.
     user_input_var_parsed = None
     if deployment.userInputVar:
         try:
-            user_input_var_parsed = json.loads(deployment.userInputVar)
+            user_input_var_parsed = _strip_file_vars_from_user_input(
+                json.loads(deployment.userInputVar)
+            )
         except json.JSONDecodeError:
             user_input_var_parsed = None
 
@@ -233,6 +243,372 @@ def get_deployment(
         outputs=outputs,
         logs=logs,
     )
+
+
+# ----------------------------------------------------------------
+# CREATE DEPLOYMENT
+# ----------------------------------------------------------------
+
+# Defense-in-depth limits for inline file uploads. The UX-side warning
+# is mirrored on the wizard, but a hand-crafted POST could still try
+# to push GBs of payload through ``userInputVar``. We refuse before
+# the row hits the DB.
+#
+# Per-file cap matches the existing app-image cap so users don't have
+# to learn a second number; deployment-wide cap is 5× that, leaving
+# headroom for (e.g.) one big assignment plus several small starter
+# files. Both are enforced post-base64-decode so a malicious base64
+# blob of right-shape but wrong-size still fails fast.
+_MAX_FILE_BYTES_PER_FILE = 2 * 1024 * 1024
+_MAX_FILE_BYTES_PER_DEPLOYMENT = 10 * 1024 * 1024
+
+
+def _attach_files_to_user_input(
+    user_input_var: dict | None,
+    files: dict | None,
+    variable_definitions: list[dict] | None = None,
+) -> dict:
+    """Validate and merge wizard-uploaded files into ``userInputVar``.
+
+    The wizard ships files in a parallel ``files`` field instead of
+    nesting them straight into ``userInputVar.terraform`` so the
+    request payload's shape is obvious to a reader and so we can
+    apply size / encoding validation in one place. Result is a fresh
+    dict with the files folded into ``terraform[var_name]`` — the
+    worker doesn't need to know they originally came from a separate
+    field.
+
+    Validation:
+      * each top-level key in ``files`` becomes one terraform variable
+      * each inner-map entry is one ``DeploymentFileUpload`` record
+      * ``content_b64`` decodes cleanly (RFC 4648, padding optional)
+      * decoded size matches the declared ``size`` (within rounding —
+        client may have set it before encoding so we accept ±1)
+      * per-file cap and total deployment cap
+      * if ``variable_definitions`` are provided and a file variable
+        declares ``fileExtensions``, each uploaded filename's suffix
+        (lowercased, after the last dot) must be in the allowed list.
+        Defense-in-depth: the wizard's ``accept`` attribute already
+        filters in the picker, but a hand-crafted POST could bypass it.
+
+    Raises ``HTTPException(413)`` for size violations and
+    ``HTTPException(422)`` for malformed payload — Pydantic already
+    rejected the obvious cases (missing fields, wrong types) before
+    we get here, so we only catch what gets past it.
+    """
+    base = dict(user_input_var or {})
+    base.setdefault("terraform", {})
+    base.setdefault("packer", {})
+
+    if not files:
+        return base
+
+    # Build an index var_name → allowed_extensions for the extension
+    # check below. Variables without ``fileExtensions`` skip the
+    # filter — keeps backward compatibility for any caller that doesn't
+    # supply ``variable_definitions``.
+    allowed_exts_by_var: dict[str, list[str]] = {}
+    if variable_definitions:
+        for vdef in variable_definitions:
+            exts = vdef.get("fileExtensions")
+            if exts:
+                allowed_exts_by_var[vdef["name"]] = [e.lower() for e in exts]
+
+    total_bytes = 0
+    terraform_block = dict(base.get("terraform") or {})
+
+    for var_name, slot_map in files.items():
+        if var_name in terraform_block:
+            # Wizard already routed something into this variable — a
+            # collision means the frontend filled both the variables
+            # picker AND the file uploader for the same name. That's
+            # an unrecoverable contract bug; surface it clearly.
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail={
+                    "reason": "file_var_collision",
+                    "variable": var_name,
+                },
+            )
+        if not isinstance(slot_map, dict) or not slot_map:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail={"reason": "file_var_empty", "variable": var_name},
+            )
+
+        encoded_slots: dict[str, dict] = {}
+        for slot_key, upload in slot_map.items():
+            # ``upload`` arrives here as a Pydantic model instance
+            # already (FastAPI deserialised the request body into
+            # ``DeploymentCreate``) — pull fields off attributes.
+            content_b64 = upload.content_b64
+
+            # Extension-Filter check — only when the App-Autor declared
+            # an ``@openstack:file:<scope>:<exts>`` filter. We compare
+            # the filename suffix (after the last dot, lowercased) to
+            # the allowed list. Missing dot or unknown suffix → 422.
+            allowed_exts = allowed_exts_by_var.get(var_name)
+            if allowed_exts is not None:
+                name = upload.name or ""
+                dot = name.rfind(".")
+                suffix = name[dot + 1 :].lower() if dot >= 0 else ""
+                if suffix not in allowed_exts:
+                    raise HTTPException(
+                        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                        detail={
+                            "reason": "file_extension_rejected",
+                            "variable": var_name,
+                            "slot": slot_key,
+                            "filename": upload.name,
+                            "allowed": allowed_exts,
+                        },
+                    )
+            try:
+                # ``validate=True`` would reject any non-base64
+                # whitespace; the wizard sends compact base64 so this
+                # is fine.
+                decoded = base64.b64decode(content_b64, validate=True)
+            except (binascii.Error, ValueError) as e:
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail={
+                        "reason": "file_b64_invalid",
+                        "variable": var_name,
+                        "slot": slot_key,
+                        "error": str(e),
+                    },
+                )
+
+            if abs(len(decoded) - upload.size) > 1:
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail={
+                        "reason": "file_size_mismatch",
+                        "variable": var_name,
+                        "slot": slot_key,
+                        "declared": upload.size,
+                        "actual": len(decoded),
+                    },
+                )
+
+            if len(decoded) > _MAX_FILE_BYTES_PER_FILE:
+                raise HTTPException(
+                    status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                    detail={
+                        "reason": "file_too_large",
+                        "variable": var_name,
+                        "slot": slot_key,
+                        "limit_bytes": _MAX_FILE_BYTES_PER_FILE,
+                        "actual_bytes": len(decoded),
+                    },
+                )
+            total_bytes += len(decoded)
+            if total_bytes > _MAX_FILE_BYTES_PER_DEPLOYMENT:
+                raise HTTPException(
+                    status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                    detail={
+                        "reason": "deployment_files_too_large",
+                        "limit_bytes": _MAX_FILE_BYTES_PER_DEPLOYMENT,
+                    },
+                )
+
+            # Map shape exactly to the HCL contract documented for
+            # ``@openstack:file:<scope>`` markers — one ``object``
+            # per slot, no extra wrapper. The earlier
+            # ``{slot: {"uploaded": {...}}}`` indirection was meant
+            # to leave room for multi-file-per-slot, but that would
+            # need a different HCL type (``list(object(...))``)
+            # anyway, so the wrapper bought nothing and forced every
+            # template to either tolerate the alien layer or fail
+            # validation with "attribute X is required" the way
+            # this deploy did.
+            encoded_slots[slot_key] = {
+                "name": upload.name,
+                "content_b64": content_b64,
+                "size": upload.size,
+                "content_type": upload.content_type or "application/octet-stream",
+            }
+        terraform_block[var_name] = encoded_slots
+
+    base["terraform"] = terraform_block
+    return base
+
+
+def _validate_scoped_user_input(
+    user_input_var: dict | None,
+    variable_definitions: list[dict],
+    teams_payload: list,
+) -> None:
+    """Enforce that variables marked with ``varScope = team|user``
+    arrive as a map whose keys match the deployment's team / user roster.
+
+    Reasoning: the wizard packs scoped variables as a Map
+    (``{slot_key: value, ...}``) and ships them via ``userInputVar``.
+    A hand-crafted POST could ship arbitrary keys; we want unknown
+    Scope-Targets to fail fast and loud before they hit Terraform,
+    where the error would be a confusing "module: invalid for_each
+    key" deep in the worker log.
+
+    File variables are skipped here — they go through
+    :func:`_attach_files_to_user_input` which has its own per-slot
+    validation and already lives at the right layer.
+
+    Raises ``HTTPException(422)`` with ``reason="unknown_scope_target"``
+    or ``reason="scoped_var_not_map"`` for shape/identity problems.
+    """
+    if not user_input_var:
+        return
+
+    # Compose the universe of valid slot keys per scope. ``team``
+    # accepts any team name; ``user`` accepts ``TeamName-Username``
+    # composites — mirror of ``userSlotKey`` in the wizard.
+    team_names: set[str] = set()
+    user_slot_keys: set[str] = set()
+    for team in teams_payload or []:
+        team_name = getattr(team, "name", None) or (team.get("name") if isinstance(team, dict) else None)
+        if not team_name:
+            continue
+        team_names.add(team_name)
+        # ``team.userIds`` contains UUID strings here, not usernames —
+        # the deployment endpoint resolves usernames just below us
+        # when assembling ``teams_dict``. We accept any non-empty
+        # composite key prefix-matching ``f"{team_name}-"`` for
+        # user-scoped variables, because the wizard renders one slot
+        # per member and labels it with the username (not the UUID).
+        # A stricter check would require an extra DB round-trip; the
+        # prefix-and-non-empty check is enough to catch typos and
+        # cross-team key smuggling.
+    # NB: ``user_slot_keys`` stays empty — we use the team-prefix
+    # check below instead. That's a deliberate trade: cheap and
+    # immediate, vs. a per-username round-trip we'd otherwise need.
+
+    for source_key in ("terraform", "packer"):
+        block = user_input_var.get(source_key)
+        if not isinstance(block, dict):
+            continue
+        for vdef in variable_definitions:
+            if vdef.get("source") != source_key:
+                continue
+            if vdef.get("osType") == "file":
+                continue  # handled by _attach_files_to_user_input
+            scope = vdef.get("varScope")
+            if scope not in ("team", "user"):
+                continue
+            var_name = vdef["name"]
+            value = block.get(var_name)
+            if value is None:
+                continue  # variable left at HCL default — allowed
+            if not isinstance(value, dict):
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail={
+                        "reason": "scoped_var_not_map",
+                        "variable": var_name,
+                        "scope": scope,
+                    },
+                )
+            for slot_key in value.keys():
+                if scope == "team":
+                    if slot_key not in team_names:
+                        raise HTTPException(
+                            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                            detail={
+                                "reason": "unknown_scope_target",
+                                "variable": var_name,
+                                "scope": scope,
+                                "slot": slot_key,
+                                "allowed": sorted(team_names),
+                            },
+                        )
+                else:  # user scope
+                    # Composite key ``TeamName-Username``: split on the
+                    # first ``-``, verify the prefix is a known team.
+                    sep = slot_key.find("-")
+                    prefix = slot_key[:sep] if sep > 0 else ""
+                    if prefix not in team_names:
+                        raise HTTPException(
+                            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                            detail={
+                                "reason": "unknown_scope_target",
+                                "variable": var_name,
+                                "scope": scope,
+                                "slot": slot_key,
+                                "hint": "expected ``TeamName-Username``",
+                            },
+                        )
+
+
+def _strip_file_vars_from_user_input(user_input_var: dict | None) -> dict | None:
+    """Strip per-file ``content_b64`` payloads from a userInputVar dict.
+
+    Used by the deployment detail responses so the JSON the frontend
+    receives only carries metadata (name/size/content_type) — the
+    decoded bytes can be many MBs each and shipping them on every
+    page render is wasteful. Owners who actually want the file fetch
+    it via the dedicated download endpoint.
+
+    Heuristic-based: a variable is a file slot when its value is a
+    mapping whose entries each carry a ``content_b64`` field — the
+    same shape ``_attach_files_to_user_input`` writes. We match on
+    that key because no other user-input kind uses it.
+    """
+    if not isinstance(user_input_var, dict):
+        return user_input_var
+
+    out = {k: v for k, v in user_input_var.items() if k != "terraform"}
+    tf_block = user_input_var.get("terraform")
+    if not isinstance(tf_block, dict):
+        if "terraform" in user_input_var:
+            out["terraform"] = tf_block
+        return out
+
+    stripped_tf: dict = {}
+    for var_name, value in tf_block.items():
+        if _looks_like_file_var(value):
+            stripped_tf[var_name] = _file_var_metadata_only(value)
+        else:
+            stripped_tf[var_name] = value
+    out["terraform"] = stripped_tf
+    return out
+
+
+def _looks_like_file_var(value) -> bool:
+    """True if ``value`` matches the file-upload shape produced by
+    :func:`_attach_files_to_user_input`: a non-empty mapping whose
+    values are objects carrying ``content_b64`` plus the metadata
+    triplet. Used at response-shaping time to identify file-typed
+    variables without consulting the app's variable schema.
+
+    Shape examples it matches (and only these):
+
+    * ``scope=all``   → ``{"all": {name, content_b64, size, content_type}}``
+    * ``scope=team``  → ``{"Team-1": {...}, "Team-2": {...}}``
+    * ``scope=user``  → ``{"Team-1-luca": {...}, ...}``
+
+    No legacy-wrapped-shape detection — rows persisted in the old
+    ``{slot: {"uploaded": {...}}}`` indirection are dealt with by
+    hand. Keeping this strict keeps the surface tight.
+    """
+    if not isinstance(value, dict) or not value:
+        return False
+    for slot in value.values():
+        if not isinstance(slot, dict):
+            return False
+        if "content_b64" not in slot:
+            return False
+    return True
+
+
+def _file_var_metadata_only(value: dict) -> dict:
+    """Return a copy of a file-shape variable with the ``content_b64``
+    payload stripped. Metadata fields (name, size, content_type)
+    survive so the UI can list "what was uploaded" without shipping
+    base64 megabytes on every detail-view render.
+    """
+    out: dict = {}
+    for slot_key, slot in value.items():
+        out[slot_key] = {k: v for k, v in slot.items() if k != "content_b64"}
+    return out
 
 
 # ----------------------------------------------------------------
@@ -268,24 +644,44 @@ def create_deployment(
             detail={"reason": "app_not_found_or_deleted"},
         )
 
-    # Enforce the release workflow:
-    # - Private apps: only the creator may deploy (all versions allowed).
-    # - Public apps: the requested releaseTag must have an APPROVED entry.
-    if target_app.is_private:
-        if str(target_app.userId) != str(current_user.userId):
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail={"reason": "app_is_private"},
-            )
-    else:
-        release_tag = deployment.releaseTag
-        if not release_tag or not crud_approvals.has_approved_version(
-            db, target_app.appId, release_tag
-        ):
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail={"reason": "version_not_approved"},
-            )
+    # Load the App-Autor's variable declarations so we can enforce
+    # per-variable contracts (``varScope``, ``fileExtensions``) below.
+    # We only do this when the request actually carries variables /
+    # files — for a no-input deploy the round-trip into Git would be
+    # waste. Same parser as ``GET /apps/{id}/variables`` so client and
+    # server agree on which variable is scoped/file/free-text.
+    variable_definitions: list[dict] = []
+    if deployment.userInputVar or deployment.files:
+        from app.routers.apps import load_variable_definitions
+        release_tag = deployment.releaseTag or "main"
+        try:
+            variable_definitions = load_variable_definitions(target_app, release_tag)
+        except HTTPException:
+            # Re-raise — the helper already produces a sensible error.
+            raise
+
+    # Fold the wizard's parallel ``files`` upload into
+    # ``userInputVar.terraform`` before the row gets persisted, so the
+    # rest of this handler — and the worker downstream — sees one
+    # uniform dict. The helper validates base64 / size / per-file and
+    # per-deployment caps; any failure short-circuits with a 4xx and
+    # the row never enters the DB. When variable definitions are
+    # available, the helper also enforces the App-Autor's declared
+    # ``fileExtensions`` filter on each upload name.
+    deployment.userInputVar = _attach_files_to_user_input(
+        deployment.userInputVar, deployment.files, variable_definitions or None,
+    )
+
+    # Enforce ``varScope = team|user`` contracts: each value must be a
+    # map whose keys match the deployment's team / user roster. This
+    # is defense-in-depth — the wizard already only renders slots the
+    # user can fill, but a hand-crafted POST could ship unknown keys.
+    if variable_definitions:
+        _validate_scoped_user_input(
+            deployment.userInputVar,
+            variable_definitions,
+            deployment.teams or [],
+        )
 
     db_deployment = crud_deployments.create_deployment(
         db, deployment, current_user.userId
@@ -403,7 +799,12 @@ def create_deployment(
     user_input_var_parsed = None
     if db_deployment.userInputVar:
         try:
-            user_input_var_parsed = json.loads(db_deployment.userInputVar)
+            # Same file-strip rule as the list/detail endpoints: the
+            # POST response shape mirrors the read shape so the
+            # frontend can reuse the same parsing code-path.
+            user_input_var_parsed = _strip_file_vars_from_user_input(
+                json.loads(db_deployment.userInputVar)
+            )
         except json.JSONDecodeError:
             user_input_var_parsed = None
 
@@ -426,12 +827,14 @@ def create_deployment(
 # One endpoint, two outcomes — the backend picks the right one from
 # the deployment's status:
 #
-#   * ``success`` / ``failed``  → dispatch a Destroy task (terraform
-#     destroy + auto-soft-delete on success).  Returns 202 + task_id;
-#     the frontend keeps the live stream open and routes back to the
-#     list when the task finishes.
+#   * ``success`` / ``failed`` / ``paused`` → dispatch a Destroy task
+#     (terraform destroy + auto-soft-delete on success). ``paused`` is
+#     in the destroy set because SHUTOFF instances + volumes/networks
+#     are still OpenStack resources that need to be reclaimed.
+#     Returns 202 + task_id; the frontend keeps the live stream open
+#     and routes back to the list when the task finishes.
 #   * ``cancelled``             → soft-delete immediately. Returns 204.
-#   * any other status (running / pending / destroying)
+#   * any other status (running / pending / destroying / pausing / resuming)
 #                               → 409, the user has to wait.
 #
 # Frontend doesn't have to know the difference — it just calls DELETE
@@ -457,10 +860,18 @@ def delete_deployment(
     ensure_deployment_access(deployment, current_user, db)
     ensure_deployment_owner_view(deployment, current_user)
 
+    # Per-deployment advisory lock — serialises against any concurrent
+    # POST /pause, /resume or DELETE on the same deployment so the
+    # ``current_status`` read below and the eventual
+    # ``prepare_task_in_tx`` insert see a consistent picture. Without
+    # this, two concurrent destroys could both pass the in-flight check
+    # and one would crash on the partial unique index.
+    crud_locks.acquire_deployment_xact_lock(db, deployment_id)
+
     current_status = crud_deployments.get_deployment_status(db, deployment_id)
 
     # Active task in flight — neither path is safe.
-    if current_status in ("pending", "running", "destroying"):
+    if current_status in lifecycle_service.IN_FLIGHT_STATUSES:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail=(
@@ -470,8 +881,13 @@ def delete_deployment(
         )
 
     # Resources may exist — destroy them first; the listener will
-    # auto-soft-delete the row when the destroy task succeeds.
-    if current_status in ("success", "failed"):
+    # auto-soft-delete the row when the destroy task succeeds. ``paused``
+    # also lands here: SHUTOFF instances + volumes/networks are still
+    # OpenStack resources that need to be torn down before the row can
+    # be hidden. ``pause_failed`` / ``resume_failed`` likewise still
+    # have running OpenStack resources behind them — the deployment
+    # itself didn't break, only the lifecycle pass.
+    if current_status in ("success", "failed", "paused", "pause_failed", "resume_failed"):
         return _dispatch_destroy(db, deployment, current_user)
 
     # No resources to clean up (cancelled, or anything else terminal):
@@ -488,9 +904,48 @@ def delete_deployment(
 def _dispatch_destroy(db: Session, deployment, current_user: User):
     """Enqueue the destroy worker task for a deployment.
 
-    Extracted so DELETE can call it for the success/failed case and so
-    the implementation stays close to the create-deployment dispatch
-    pattern: atomic PENDING task insert → commit → ``send_task``.
+    Thin wrapper around :func:`_dispatch_lifecycle_task` so DELETE can
+    keep its existing two-call sites (success-path / failed-path) clear.
+    """
+    return _dispatch_lifecycle_task(
+        db,
+        deployment,
+        current_user,
+        task_type=TaskType.DESTROY,
+        celery_task_name="tasks.destroy_deployment",
+        response_status="destroying",
+    )
+
+
+def _dispatch_lifecycle_task(
+    db: Session,
+    deployment,
+    current_user: User,
+    task_type: TaskType,
+    celery_task_name: str,
+    response_status: str,
+):
+    """Enqueue any post-deploy lifecycle worker task for a deployment.
+
+    Used by destroy, pause, and resume — all three follow the same
+    pattern: load user inputs, gather team membership, fetch the
+    encrypted OpenStack envelope, atomically insert a PENDING task row,
+    commit, then ``send_task`` outside the locked TX. On a Celery send
+    failure the task row flips to FAILED in a fresh TX (handled inside
+    ``dispatch_to_celery``) and we surface a 503 so the user sees an
+    obvious failure instead of a permanent in-flight status.
+
+    Args:
+        task_type:           the ``TaskType`` enum value that drives both
+                             the task row's ``type`` column and the
+                             status the partial-unique index prevents
+                             from coexisting.
+        celery_task_name:    name registered on the worker side (e.g.
+                             ``tasks.pause_deployment``).
+        response_status:     synthetic deployment status returned to the
+                             frontend in the 202 body — frontend uses
+                             this to immediately switch the UI into the
+                             live-stream view without re-fetching.
     """
     try:
         user_vars = json.loads(deployment.userInputVar) if deployment.userInputVar else {}
@@ -521,7 +976,7 @@ def _dispatch_destroy(db: Session, deployment, current_user: User):
         task = task_service_module.prepare_task_in_tx(
             db,
             deployment_id=deployment.deploymentId,
-            task_type=TaskType.DESTROY,
+            task_type=task_type,
         )
     except task_service_module.ActiveTaskExistsError:
         raise HTTPException(
@@ -536,7 +991,7 @@ def _dispatch_destroy(db: Session, deployment, current_user: User):
         task, _celery_id = task_service_module.dispatch_to_celery(
             db,
             task=task,
-            celery_task_name="tasks.destroy_deployment",
+            celery_task_name=celery_task_name,
             celery_args=[
                 str(deployment.deploymentId),
                 str(deployment.appId),
@@ -550,12 +1005,208 @@ def _dispatch_destroy(db: Session, deployment, current_user: User):
     except Exception:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Could not dispatch destroy task — please retry",
+            detail=f"Could not dispatch {task_type.value} task — please retry",
         )
 
     return JSONResponse(
         status_code=status.HTTP_202_ACCEPTED,
-        content={"task_id": str(task.taskId), "status": "destroying"},
+        content={"task_id": str(task.taskId), "status": response_status},
+    )
+
+
+# ----------------------------------------------------------------
+# PAUSE DEPLOYMENT
+# ----------------------------------------------------------------
+#
+# Halts the OpenStack compute instances of a deployment without
+# tearing them down. The worker task pulls the terraform state, lists
+# every ``openstack_compute_instance_v2`` resource, and runs
+# ``openstack server stop`` against each. Volumes and networks stay,
+# so RESUME restores the same instances byte-for-byte.
+#
+# Allowed only on ``status='success'`` — the lifecycle service is the
+# single source of truth, the partial-unique index on active tasks is
+# the DB-level backstop.
+@router.post("/{deployment_id}/pause", status_code=status.HTTP_202_ACCEPTED)
+def pause_deployment(
+    deployment_id: UUID,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user_keycloak),
+):
+    """Pause a running deployment by stopping its compute instances.
+
+    Owner-only — same gate as Destroy, because pausing a teammate's
+    deployment is in practice a denial-of-service against the team.
+
+    Returns ``202 + {task_id, status: "pausing"}`` on dispatch. The
+    frontend reads ``status`` to switch to the live SSE view; the
+    deployment's effective status is recomputed from the new task
+    row by ``crud_deployments.get_deployment_status``.
+    """
+    deployment = crud_deployments.get_deployment_with_details(db, deployment_id)
+    if not deployment:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Deployment not found",
+        )
+
+    ensure_deployment_access(deployment, current_user, db)
+    ensure_deployment_owner_view(deployment, current_user)
+    # Hold the per-deployment advisory lock across the status check
+    # AND the task insert so a parallel POST /pause can't sneak past
+    # ``ensure_action_allowed`` between our read and the
+    # ``prepare_task_in_tx`` flush.
+    crud_locks.acquire_deployment_xact_lock(db, deployment_id)
+    lifecycle_service.ensure_action_allowed(
+        db, deployment, lifecycle_service.DeploymentAction.PAUSE,
+    )
+
+    return _dispatch_lifecycle_task(
+        db,
+        deployment,
+        current_user,
+        task_type=TaskType.PAUSE,
+        celery_task_name="tasks.pause_deployment",
+        response_status="pausing",
+    )
+
+
+# ----------------------------------------------------------------
+# RESUME DEPLOYMENT
+# ----------------------------------------------------------------
+#
+# Reverses Pause. Allowed only on ``status='paused'`` — a deployment
+# that was never paused has nothing to resume, so the lifecycle
+# matrix gates this strictly. Returns 202 with the same shape as
+# Pause/Destroy so the frontend handles all three the same way.
+@router.post("/{deployment_id}/resume", status_code=status.HTTP_202_ACCEPTED)
+def resume_deployment(
+    deployment_id: UUID,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user_keycloak),
+):
+    """Resume a paused deployment by starting its compute instances."""
+    deployment = crud_deployments.get_deployment_with_details(db, deployment_id)
+    if not deployment:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Deployment not found",
+        )
+
+    ensure_deployment_access(deployment, current_user, db)
+    ensure_deployment_owner_view(deployment, current_user)
+    # Per-deployment advisory lock — same justification as in
+    # ``pause_deployment`` above: keep the status check and the task
+    # insert atomic against concurrent /resume / /pause / DELETE
+    # requests on this deployment.
+    crud_locks.acquire_deployment_xact_lock(db, deployment_id)
+    lifecycle_service.ensure_action_allowed(
+        db, deployment, lifecycle_service.DeploymentAction.RESUME,
+    )
+
+    return _dispatch_lifecycle_task(
+        db,
+        deployment,
+        current_user,
+        task_type=TaskType.RESUME,
+        celery_task_name="tasks.resume_deployment",
+        response_status="resuming",
+    )
+
+
+# ----------------------------------------------------------------
+# DOWNLOAD UPLOADED FILE
+# ----------------------------------------------------------------
+#
+# Lets the deployment owner re-fetch a file they uploaded at deploy
+# time. The list / detail endpoints strip the base64 payload so they
+# don't ship megabytes per page render; this endpoint is the only
+# path that returns the actual bytes. Owner-only — members can see
+# that a file was uploaded (metadata survives the strip), but the
+# bytes themselves stay restricted to whoever created the deployment.
+@router.get(
+    "/{deployment_id}/files/{var_name}/{slot_key}",
+    response_class=Response,
+)
+def download_deployment_file(
+    deployment_id: UUID,
+    var_name: str,
+    slot_key: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user_keycloak),
+):
+    """Stream the raw bytes of one wizard-uploaded file back to the owner.
+
+    Path components mirror how the upload was indexed:
+      * ``var_name`` — the ``@openstack:file:*`` variable name
+      * ``slot_key`` — the inner-map key (``"all"`` for scope=all,
+        team name for scope=team, ``Team-User`` composite for scope=user)
+
+    Returns 404 if any layer of the lookup misses; the frontend can
+    therefore probe a slot's existence via this endpoint without
+    needing a separate metadata response.
+    """
+    deployment = crud_deployments.get_deployment(db, deployment_id)
+    if not deployment:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Deployment not found",
+        )
+    ensure_deployment_access(deployment, current_user, db)
+    # Files are owner-readable only — the list/detail strip-pass
+    # already hid the base64 payload from members; this endpoint must
+    # match that posture explicitly so a hand-crafted URL can't
+    # bypass the strip.
+    ensure_deployment_owner_view(deployment, current_user)
+
+    if not deployment.userInputVar:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No files")
+    try:
+        user_input = json.loads(deployment.userInputVar)
+    except json.JSONDecodeError:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No files")
+
+    tf_block = user_input.get("terraform") if isinstance(user_input, dict) else None
+    var_value = (tf_block or {}).get(var_name)
+    if not _looks_like_file_var(var_value):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"No uploaded file under variable '{var_name}'",
+        )
+    # ``var_value`` is ``{slot_key: {name, content_b64, size, content_type}}``;
+    # the slot-level entry IS the file metadata, no extra wrapper.
+    entry = var_value.get(slot_key)
+    if not isinstance(entry, dict) or "content_b64" not in entry:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"No file in slot '{slot_key}'",
+        )
+
+    try:
+        payload = base64.b64decode(entry["content_b64"], validate=True)
+    except (binascii.Error, ValueError):
+        # Persisted bytes are corrupt — surface as 500 because there's
+        # nothing the caller can do; this is a server-side data bug.
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Stored file payload is not valid base64",
+        )
+
+    filename = str(entry.get("name") or f"{var_name}-{slot_key}")
+    content_type = str(entry.get("content_type") or "application/octet-stream")
+    return Response(
+        content=payload,
+        media_type=content_type,
+        headers={
+            # ``filename*`` is the RFC 5987 form for non-ASCII names;
+            # we always emit it alongside the legacy ``filename`` so
+            # clients without UTF-8 support still see something.
+            "Content-Disposition": (
+                f'attachment; filename="{filename}"; '
+                f"filename*=UTF-8''{filename}"
+            ),
+            "Content-Length": str(len(payload)),
+        },
     )
 
 
@@ -610,6 +1261,31 @@ def resend_access_credentials(
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Members may only resend their own access mail",
+        )
+
+    # Refuse while another lifecycle action is in flight. Resending
+    # the access mail relies on the latest successful DEPLOY task's
+    # ``terraform_outputs``; during pending/running/destroying/
+    # pausing/resuming the deployment is in transition and the
+    # credentials might no longer be reachable on the VM (paused →
+    # SHUTOFF, destroying → tearing down). Returning 409 here keeps
+    # the user's mental model consistent with the rest of the
+    # lifecycle gates.
+    #
+    # Per-deployment advisory lock is acquired BEFORE the status
+    # read so a concurrent /pause / /resume / DELETE can't slip a
+    # transition past us between the check and the mail send. The
+    # lock is the same one those endpoints take, so the four
+    # mutators serialise against each other on the same deployment.
+    crud_locks.acquire_deployment_xact_lock(db, deployment_id)
+    current_status = crud_deployments.get_deployment_status(db, deployment_id)
+    if current_status in lifecycle_service.IN_FLIGHT_STATUSES:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                f"Cannot resend access mail while deployment is '{current_status}'. "
+                "Wait for the active task to finish."
+            ),
         )
 
     try:

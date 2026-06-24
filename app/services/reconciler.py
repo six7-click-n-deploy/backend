@@ -37,6 +37,7 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from app.celery_app import celery_app
+from app.crud import locks as crud_locks
 from app.crud import tasks as crud_tasks
 from app.database import SessionLocal
 from app.models import Task, TaskStatus
@@ -137,6 +138,16 @@ def _release_lock(db: Session) -> None:
 
 def _reconcile_task(db: Session, task: Task) -> None:
     now = datetime.utcnow()
+
+    # Per-deployment advisory lock — serialises against the request
+    # handlers (POST /pause, /resume, DELETE, /resend-access) so the
+    # reconciler's "stuck task → FAILED" decision can't race a
+    # request handler's status-read. Held until the first
+    # ``update_task`` commits inside this body (xact-scoped); by that
+    # point the reconciler's mutation is persisted and any concurrent
+    # request handler that subsequently grabs the lock will see the
+    # latest task state.
+    crud_locks.acquire_deployment_xact_lock(db, task.deploymentId)
 
     if task.celeryTaskId is None:
         age = now - task.created_at if task.created_at else timedelta(0)

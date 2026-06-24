@@ -110,8 +110,22 @@ def derive_status(
     (``get_deployment_status``) and the bulk list path
     (``bulk_get_task_summary``).
 
-    Returns ``None`` if the deployment has no tasks yet (``task_status``
-    is ``None``).
+    Pause/resume follow the same pattern:
+
+    * ``(PAUSE,  pending|running)`` → ``pausing``
+    * ``(PAUSE,  success)``         → ``paused``
+    * ``(RESUME, pending|running)`` → ``resuming``
+    * ``(RESUME, success)``         → falls through to ``success``,
+      so a resumed deployment behaves identically to a fresh deploy
+      from the lifecycle matrix's point of view (PAUSE is offered
+      again, RESUME isn't).
+
+    PAUSE/RESUME ``failed`` and ``cancelled`` are intentionally NOT
+    rewritten — they bleed through unchanged so the user sees the
+    pause/resume itself broke (vs. the original deploy succeeded).
+    Destroy is still available from ``failed`` to recover.
+
+    Returns ``None`` if the deployment has no tasks yet.
     """
     if task_status is None:
         return None
@@ -126,6 +140,33 @@ def derive_status(
             return "destroyed"
         # failed/cancelled bleed through unchanged so the user sees that
         # the destroy itself broke (vs. the original deploy succeeded).
+    elif raw_type == "pause":
+        if raw_status in ("pending", "running"):
+            return "pausing"
+        if raw_status == "success":
+            return "paused"
+        if raw_status == "failed":
+            # Distinguish a *pause* failure from a *deploy* failure —
+            # the OpenStack resources are still running, only the
+            # stop-instances pass broke. The user shouldn't see this
+            # as a generic "failed" because the deployment itself is
+            # unaffected; the lifecycle matrix below still allows
+            # destroy / pause-retry / resume from this synthetic
+            # state.
+            return "pause_failed"
+        # cancelled bleeds through unchanged.
+    elif raw_type == "resume":
+        if raw_status in ("pending", "running"):
+            return "resuming"
+        if raw_status == "failed":
+            # Same logic as pause_failed: the SHUTOFF instances are
+            # still there, only the start pass tripped. Surface that
+            # so the user can retry resume or destroy without first
+            # being scared by a generic failed badge.
+            return "resume_failed"
+        # On resume success the deployment is "running again" — we
+        # let raw_status = "success" pass through so the lifecycle
+        # matrix treats it like a fresh successful deploy.
     return raw_status
 
 

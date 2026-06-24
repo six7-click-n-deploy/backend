@@ -2,6 +2,7 @@
 Keycloak Authentication & Authorization
 Handles token validation and user management with Keycloak.
 """
+import logging
 import threading
 
 from fastapi import Depends, HTTPException, status
@@ -13,6 +14,8 @@ from sqlalchemy.orm import Session
 from app.config import settings
 from app.database import get_db
 from app.models import User, UserRole
+
+logger = logging.getLogger(__name__)
 
 security = HTTPBearer()
 
@@ -300,3 +303,87 @@ def get_keycloak_users_by_ids(ids: list[str]) -> dict:
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to fetch Keycloak users",
         )
+
+
+# ----------------------------------------------------------------
+# JIT REFRESH FOR OUTGOING SIDE-CHANNELS (e.g. mail)
+# ----------------------------------------------------------------
+def refresh_user_from_keycloak(db: Session, user: User) -> User:
+    """Pull the latest Keycloak record for ``user`` and reconcile our DB row.
+
+    Used by paths that have to address a user *outside* of an active
+    HTTP request — most importantly the mail notifier. Without this,
+    an address change between the wizard pick and the deploy finishing
+    would silently send credentials to the previous email. We re-query
+    the Admin API right before composing the mail so the recipient
+    is always whatever Keycloak currently says it is.
+
+    Best-effort by design:
+
+    * If the user has no ``keycloak_id`` (legacy row from before
+      JIT-provisioning landed), nothing to refresh — return the row
+      unchanged.
+    * If the Admin API is down or the user was deleted in Keycloak,
+      we log at WARNING and return the row unchanged. The caller
+      proceeds with the last-known-good email so a flaky KC doesn't
+      block notifications entirely.
+
+    Reuses :func:`sync_user_from_keycloak` for the actual DB write so
+    the field-by-field reconciliation logic stays in one place.
+    """
+    if not user or not getattr(user, "keycloak_id", None):
+        return user
+
+    try:
+        kc = get_keycloak_admin()
+        kc_user = kc.get_user(user.keycloak_id)
+    except Exception as e:
+        logger.warning(
+            "refresh_user_from_keycloak: get_user(%s) failed (%s); "
+            "falling back to DB record for %s",
+            user.keycloak_id, e, user.email,
+        )
+        return user
+
+    if not kc_user:
+        logger.warning(
+            "refresh_user_from_keycloak: keycloak returned no user for id=%s; "
+            "user may have been deleted upstream — keeping DB record for %s",
+            user.keycloak_id, user.email,
+        )
+        return user
+
+    # ``get_user`` doesn't include realm roles; preserving the existing
+    # role on the DB row is the right default — role rotation is a
+    # separate flow that goes through the auth dependency on the next
+    # login. ``sync_user_from_keycloak`` re-runs role mapping over
+    # whatever ``roles`` we hand it, so we pre-seed with the current
+    # mapping to avoid a spurious role downgrade.
+    current_role_token = []
+    if user.role == UserRole.ADMIN:
+        current_role_token = ["admin"]
+    elif user.role == UserRole.TEACHER:
+        current_role_token = ["teacher"]
+
+    try:
+        return sync_user_from_keycloak(
+            db,
+            {
+                "id": kc_user.get("id") or user.keycloak_id,
+                "email": kc_user.get("email"),
+                "username": kc_user.get("username"),
+                "firstName": kc_user.get("firstName"),
+                "lastName": kc_user.get("lastName"),
+                "roles": current_role_token,
+            },
+        )
+    except HTTPException as e:
+        # ``sync_user_from_keycloak`` raises 400 when KC returns a user
+        # without an email — extremely unlikely for an existing
+        # account, but defend in depth so a one-off bad record doesn't
+        # block the notifier.
+        logger.warning(
+            "refresh_user_from_keycloak: sync rejected KC payload for %s: %s",
+            user.keycloak_id, e.detail,
+        )
+        return user

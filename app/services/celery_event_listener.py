@@ -137,6 +137,70 @@ def _get_icon(level: str) -> str:
     return icons.get(level, "•")
 
 
+# Mapping from common Celery infrastructure exception class names to
+# operator-friendly headlines. The keys are matched as substrings
+# against the raw ``event['exception']`` repr (Celery formats it as
+# e.g. ``NotRegistered('tasks.pause_deployment')``), which is robust
+# against module-prefix changes between Celery versions.
+#
+# We pair each headline with a stable ``failure_kind`` token so the
+# frontend can decide whether to phrase the toast as "deployment
+# broke" vs. "platform mismatch — deployment is unaffected".
+_CELERY_INFRA_EXCEPTIONS: tuple[tuple[str, str, str], ...] = (
+    (
+        "NotRegistered",
+        "Worker hat den Task-Typ nicht erkannt — Backend und Worker sind "
+        "nicht synchron. Bitte den Administrator informieren; das Deployment "
+        "selbst läuft weiter.",
+        "celery_infrastructure",
+    ),
+    (
+        "WorkerLostError",
+        "Der Worker-Prozess wurde während der Ausführung beendet. Der Task "
+        "wird ggf. automatisch neu gestartet — bitte den Status in Kürze "
+        "erneut prüfen.",
+        "celery_infrastructure",
+    ),
+    (
+        "TimeoutError",
+        "Der Task hat das Zeit-Limit überschritten. Wenn das wiederholt "
+        "passiert, ist meist die OpenStack-Region überlastet.",
+        "celery_infrastructure",
+    ),
+    (
+        "Reject",
+        "Der Worker hat den Task abgelehnt — wahrscheinlich ein "
+        "Routing- oder Konfigurationsproblem auf der Plattform.",
+        "celery_infrastructure",
+    ),
+    (
+        "ContentDisallowed",
+        "Der Task konnte nicht deserialisiert werden. Das ist ein "
+        "Plattform-Bug — bitte den Administrator informieren.",
+        "celery_infrastructure",
+    ),
+)
+
+
+def _translate_celery_infra_exception(
+    exception_repr: str,
+) -> tuple[str | None, str | None]:
+    """Pick a human-readable headline + failure_kind for known Celery
+    infrastructure exceptions.
+
+    Returns ``(None, None)`` when ``exception_repr`` doesn't match any
+    of the known classes — in that case the caller falls back to the
+    raw exception text. The caller is also free to attach the raw
+    text as a "Technische Details" block, which we do today.
+    """
+    if not exception_repr:
+        return (None, None)
+    for needle, headline, kind in _CELERY_INFRA_EXCEPTIONS:
+        if needle in exception_repr:
+            return (headline, kind)
+    return (None, None)
+
+
 def start_event_listener():
     """
     Start listening to Celery events from RabbitMQ
@@ -227,6 +291,21 @@ def start_event_listener():
             # Pre-initialise so the notify hook below can read it
             # regardless of which branch ran. The task-succeeded branch
             # overwrites this with the worker's actual return payload.
+            outputs: Any = None
+            # Classification of a task-failed event so the SSE pubsub
+            # event can carry it through to the frontend without a
+            # second DB roundtrip:
+            #   * ``worker_failure`` — the worker raised a structured
+            #     ``Failure(...)`` (deploy/destroy/pause/resume code
+            #     hit a real error condition like terraform apply
+            #     failure).
+            #   * ``celery_infrastructure`` — a Celery / broker-level
+            #     issue: the worker doesn't know the task name
+            #     (NotRegistered), the worker process died
+            #     (WorkerLostError), the message timed out, etc.
+            #     Surfacing these as "deployment failed" is misleading
+            #     because the deployment itself wasn't even touched.
+            failure_kind: str | None = None
             outputs: Any = None
 
             # Handle different event types
@@ -334,6 +413,9 @@ def start_event_listener():
                         break
 
                     if failure_data is not None:
+                        # Structured worker-side failure (terraform
+                        # apply broke, packer build failed, etc.).
+                        failure_kind = "worker_failure"
                         # logs
                         logs_data = failure_data.get('logs')
                         if logs_data is not None:
@@ -366,7 +448,33 @@ def start_event_listener():
                         raise ValueError("Not structured failure format")
                 except Exception as parse_error:
                     logger.warning(f"Could not parse structured failure: {parse_error}")
-                    update_data['logs'] = f"Task failed: {exception_type}\n{traceback}"
+                    # No structured ``Failure(...)`` payload — this is
+                    # almost always a Celery-side infrastructure error
+                    # (worker doesn't know the task name, worker died
+                    # mid-task, broker timeout, etc.). The raw
+                    # ``exception_type`` would be a confusing thing to
+                    # show the end user (it's a Python repr with a
+                    # stack trace). Translate the common ones into a
+                    # short operator-friendly headline; keep the raw
+                    # text in the same field, but separated by a marker
+                    # the frontend can split on. ``failure_kind`` flows
+                    # to the SSE pubsub event below so the UI knows
+                    # whether to surface a "deployment failed" or a
+                    # "worker mismatch" message.
+                    headline, kind = _translate_celery_infra_exception(
+                        str(exception_type or '')
+                    )
+                    raw_block = f"{exception_type}\n{traceback}".strip()
+                    if headline:
+                        # Two newlines + a divider so the frontend
+                        # split can find the boundary deterministically.
+                        update_data['logs'] = (
+                            f"{headline}\n\n"
+                            f"--- Technische Details ---\n{raw_block}"
+                        )
+                    else:
+                        update_data['logs'] = f"Task failed: {raw_block}"
+                    failure_kind = kind
                 logger.info(f"[FAILED] Update data for {celery_task_id}: {update_data}")
 
             elif event_type == 'task-revoked':
@@ -427,19 +535,24 @@ def start_event_listener():
             # waits forever on its queue and the page sits on the
             # progress bar even after the task finished.
             if event_type in ('task-succeeded', 'task-failed', 'task-revoked'):
-                pubsub.publish(
-                    str(task.deploymentId),
-                    {
-                        "type": event_type,
-                        "deployment_id": str(task.deploymentId),
-                        "task_id": str(task.taskId),
-                        "status": (
-                            "success" if event_type == 'task-succeeded'
-                            else "failed" if event_type == 'task-failed'
-                            else "cancelled"
-                        ),
-                    },
-                )
+                pubsub_payload: dict[str, Any] = {
+                    "type": event_type,
+                    "deployment_id": str(task.deploymentId),
+                    "task_id": str(task.taskId),
+                    "task_type": task.type.value if task.type else None,
+                    "status": (
+                        "success" if event_type == 'task-succeeded'
+                        else "failed" if event_type == 'task-failed'
+                        else "cancelled"
+                    ),
+                }
+                # Only attach ``failure_kind`` on task-failed and only
+                # if we managed to classify it — frontends can treat
+                # missing/None as "deployment-level worker failure"
+                # for backwards compat.
+                if event_type == 'task-failed' and failure_kind:
+                    pubsub_payload["failure_kind"] = failure_kind
+                pubsub.publish(str(task.deploymentId), pubsub_payload)
 
         except Exception as e:
             logger.error(f"Error processing event {event_type} for task {celery_task_id}: {e}")
