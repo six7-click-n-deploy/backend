@@ -83,11 +83,22 @@ def list_deployments(
             status=status_filter,
         )
 
-    # Enrich with status and created_at from tasks
+    # Enrich with status and created_at from tasks. The summary is
+    # bulk-fetched in two queries (latest + first task per deployment via
+    # window functions) so the list endpoint stays at a constant query
+    # count regardless of page size — the per-row ``get_latest_task`` /
+    # ``get_first_task`` fan-out used to put us at 1 + 2N queries.
+    task_summary = crud_deployments.bulk_get_task_summary(
+        db, [d.deploymentId for d in deployments]
+    )
+
     result = []
     for deployment in deployments:
-        status_value = crud_deployments.get_deployment_status(db, deployment.deploymentId)
-        created_at = crud_deployments.get_deployment_created_at(db, deployment.deploymentId)
+        latest_status, latest_type, first_created_at = task_summary.get(
+            deployment.deploymentId, (None, None, None)
+        )
+        status_value = crud_deployments.derive_status(latest_status, latest_type)
+
         # Parse userInputVar JSON string back to dict if it exists
         user_input_var_parsed = None
         if deployment.userInputVar:
@@ -104,7 +115,7 @@ def list_deployments(
             releaseTag=deployment.releaseTag,
             userInputVar=user_input_var_parsed,
             status=status_value,
-            created_at=created_at,
+            created_at=first_created_at,
         ))
 
     return result
