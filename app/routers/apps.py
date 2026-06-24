@@ -48,9 +48,14 @@ router = APIRouter()
 #
 # Grammatik (positional, mit Defaults):
 #
-#     @openstack:<type>[:<mode>][:<multi>]
+#     @openstack:<type>[:<mode>][:<multi>][:<var_scope>]
 #
 #   <type>   — eine der unten gelisteten Resource-Kinds (siehe ``_OS_TYPES``)
+#              ODER LEER. Ein leerer Type-Slot ist erlaubt, wenn der Marker
+#              ausschließlich dazu dient, einen ``var_scope`` zu setzen
+#              (Beispiel: ``@openstack:::user`` markiert eine sonst freie
+#              String-Variable als per-User-scoped, ohne einen Resource-
+#              Picker zu erzwingen).
 #   <mode>   — 'id' | 'name'   (default: 'name'; siehe auch
 #              ``_NAME_ONLY_TYPES`` für Resourcen, bei denen 'id' praktisch
 #              sinnlos ist)
@@ -60,6 +65,14 @@ router = APIRouter()
 #              → multi, sonst single. ``map(...)`` und ``object(...)`` sind
 #              technische Kollektionen, gelten hier aber als single — wer
 #              die als Multi will, schreibt ``:multi`` explizit.)
+#   <var_scope> — 'all' | 'team' | 'user'   (default: 'all'). Steuert, ob
+#              der Wizard genau EIN Eingabefeld rendert (``all``), eines
+#              pro Team (``team``) oder eines pro User (``user``). Bei
+#              ``team``/``user`` muss der HCL-Type eine ``map(...)`` sein,
+#              weil das Backend die Slot-Map 1:1 in die Terraform-
+#              Variable schreibt. Für Packer-Variablen ist nur ``all``
+#              erlaubt — ein Image wird einmal gebaut und kann nicht
+#              per-Team divergieren.
 #
 # Beispiele:
 #     @openstack:network                        → network, name-mode, multi aus HCL
@@ -69,6 +82,10 @@ router = APIRouter()
 #     @openstack:image:id:single                → image, id-mode, single (auch wenn
 #                                                  HCL ``list(string)`` wäre →
 #                                                  Konfliktcheck schlägt zu)
+#     @openstack:flavor:id:single:team          → pro Team eine Flavor-ID; HCL muss
+#                                                  ``map(string)`` sein.
+#     @openstack:::user                         → reine Free-Text-Variable, pro User
+#                                                  scoped; HCL muss ``map(...)`` sein.
 #
 # Der Marker darf an einer beliebigen Stelle in der Description stehen,
 # muss aber an einem Wort-Ende terminieren (Whitespace, Zeilenende oder
@@ -110,8 +127,8 @@ _OS_TYPES: set[str] = {
     # widget and route the bytes into ``userInputVar.terraform`` so the
     # template can drop them onto the VM via cloud-init ``write_files``.
     # The mode slot carries the scope (``all``/``team``/``user``); the
-    # multi slot is reserved for future multi-file-per-slot support and
-    # must stay empty today (``:multi`` is rejected with a clear error).
+    # multi slot carries the PFLICHT-Endungsfilter (z.B. ``pdf`` oder
+    # ``pdf|docx``) — ein File-Marker ohne Filter wird abgelehnt.
     "file",
 }
 
@@ -119,6 +136,18 @@ _OS_TYPES: set[str] = {
 # mode slot of the marker grammar — keeps the regex shape unchanged
 # while teaching the parser to interpret the slot per-type.
 _FILE_SCOPES: set[str] = {"all", "team", "user"}
+
+# Pflicht-Filter im vierten Marker-Slot bei File-Variablen. Wir
+# erlauben nur Buchstaben+Ziffern und ``|`` als Trenner; case-
+# insensitive matchen, intern lowercased. Beispiele: ``pdf``,
+# ``pdf|docx|txt``. Kein Leerwert — ein File-Marker ohne Filter
+# ist Fehler.
+_FILE_EXTENSIONS_RE = re.compile(r"^[a-z0-9]+(?:\|[a-z0-9]+)*$")
+
+# Erlaubte Werte für den allgemeinen ``var_scope``-Slot (vierter
+# Slot bei non-file-Markern). ``all`` ist der Default — Variablen
+# ohne Marker sowie Marker ohne 4. Slot werden auf ``all`` aufgelöst.
+_VAR_SCOPES: set[str] = {"all", "team", "user"}
 
 # Resource-Kinds, die in OpenStack faktisch keine UUID haben oder
 # durchgängig namensbasiert adressiert werden — z.B. Keypairs (Nova
@@ -135,31 +164,42 @@ _NAME_ONLY_TYPES: set[str] = {"keypair", "availability_zone", "floating_ip_pool"
 # Marker-Regex. Wir matchen das ganze Token an Wort-Grenzen, damit
 # Beispiele in Prosa wie ``"siehe @openstack:network in der Doku"``
 # erkannt werden, aber ein zufälliges ``"@openstackbar"`` NICHT matcht.
-# Slot-Inhalt darf KEIN Whitespace haben. Vier oder mehr Doppelpunkte
+# Slot-Inhalt darf KEIN Whitespace haben. Fünf oder mehr Doppelpunkte
 # = malformed (siehe ``_TOO_MANY_SEGMENTS_RE``).
 #
 # Boundary-Zeichen rechts: alles was kein Identifier-Zeichen ist —
 # Whitespace, Zeilenende, gängige Satzzeichen ``. , ; : ! ? ) ] " '``.
 # Linke Grenze: Anfang oder dieselben Boundary-Zeichen.
+#
+# Slot-Inhalte:
+#  * Slot 1 (type): ``[A-Za-z][A-Za-z0-9_]*`` oder LEER. Ein leerer
+#    Type-Slot ist semantisch „nur var_scope setzen, kein Resource-
+#    Picker erzwingen".
+#  * Slots 2/3: ``[A-Za-z]*`` (heutiges Verhalten).
+#  * Slot 4 (var_scope für non-file, file-extensions-Filter für file):
+#    ``[A-Za-z0-9|]*``. Das ``|`` ist nur für den File-Filter-Fall
+#    nötig (z.B. ``pdf|docx``); für var_scope-Werte wäre es überflüssig,
+#    schadet aber nicht. Die semantische Trennung passiert im Parser.
 _MARKER_RE = re.compile(
     r"""
     (?:^|(?<=[\s.,;:!?()\[\]"']))   # Linke Grenze: Anfang oder Whitespace/Satzzeichen
     @openstack
-    :([A-Za-z][A-Za-z0-9_]*)        # 1: type
+    :([A-Za-z][A-Za-z0-9_]*)?       # 1: type (kann leer sein → nur-scope-Marker)
     (?::([A-Za-z]*))?               # 2: mode-Slot (kann leer sein)
     (?::([A-Za-z]*))?               # 3: multi-Slot (kann leer sein)
+    (?::([A-Za-z0-9|]*))?           # 4: var_scope / file-extensions (kann leer sein)
     (?=$|[\s.,;:!?)\]"'])           # Rechte Grenze
     """,
     re.VERBOSE,
 )
 
 # Schnell-Check: der Marker hat zu viele Segmente?
-# ``@openstack:network:id:multi:extra`` → fail.
-# Wir verlangen, dass JEDES der 4+ Segmente nicht-leer ist, sonst
-# würde ``@openstack:network:id:multi:`` (Trailing-Colon, klare 3-Slot-
-# Form) fälschlich als „zu viele Segmente" gefangen.
+# ``@openstack:network:id:multi:team:extra`` → fail.
+# Wir verlangen, dass JEDES der 5+ Segmente nicht-leer ist, sonst
+# würde ``@openstack:network:id:multi:team:`` (Trailing-Colon, klare
+# 4-Slot-Form) fälschlich als „zu viele Segmente" gefangen.
 _TOO_MANY_SEGMENTS_RE = re.compile(
-    r"@openstack(?::[A-Za-z0-9_]+){4,}",
+    r"@openstack(?::[A-Za-z0-9_|]+){5,}",
     re.IGNORECASE,
 )
 
@@ -192,16 +232,17 @@ class MarkerError(ValueError):
 
 
 def _parse_marker(
-    var_name: str, var_type: str, description: str
-) -> tuple[str | None, str | None, bool | None, str | None]:
+    var_name: str, var_type: str, description: str, source: str = "terraform"
+) -> tuple[str | None, str | None, bool | None, str | None, str | None, list[str] | None]:
     """
-    Parst den ``@openstack:<type>[:<mode>][:<multi>]``-Marker aus der
-    Description. Liefert ``(None, None, None, None)`` wenn KEIN Marker
-    da ist (das ist KEIN Fehler — die Variable wird dann als Free-Text
-    gerendert).
+    Parst den ``@openstack:<type>[:<mode>][:<multi>][:<var_scope>]``-Marker
+    aus der Description. Liefert ``(None, None, None, None, None, None)``
+    wenn KEIN Marker da ist (das ist KEIN Fehler — die Variable wird dann
+    als Free-Text gerendert).
 
     Multi-Marker-Verhalten: Findet die Funktion mehrere Marker, nimmt sie
-    den ersten, dessen Type bekannt ist. Das ist absichtlich tolerant —
+    den ersten, dessen Type bekannt ist ODER der einen leeren Type-Slot
+    hat (= reiner var_scope-Marker). Das ist absichtlich tolerant —
     Apps zitieren manchmal ältere Marker-Schreibweisen in der Description
     („migration: ``@openstack:vm`` → ``@openstack:network``"). Mode/Multi-
     Validierungs-Fehler des gewählten Markers sind weiterhin hart, weil
@@ -209,29 +250,42 @@ def _parse_marker(
 
     Wirft ``MarkerError`` bei:
       - malformiertem Marker (zu viele Segmente, internes Whitespace,
-        unbekannte mode/multi-Tokens, ``@openstack:`` ohne erkennbaren
-        Type-Slot, Slot-Trenner mit Sonderzeichen statt ``:``)
+        unbekannte mode/multi/scope-Tokens, Slot-Trenner mit Sonderzeichen
+        statt ``:``)
       - widersprüchlichem Marker vs. HCL-Type (``:single`` mit
-        ``type = list(...)`` oder ``:multi`` mit ``type = number``)
-      - file-spezifisch: ungültigem Scope (``@openstack:file:foo``) oder
-        nicht-leerem Multi-Slot (``@openstack:file:user:multi``).
+        ``type = list(...)`` oder ``:multi`` mit ``type = number``;
+        ``:team``/``:user`` mit ``type = string``)
+      - file-spezifisch: ungültigem Scope (``@openstack:file:foo``),
+        fehlendem Endungs-Filter (``@openstack:file:all``) oder
+        ungültigem Filter (``@openstack:file:all:pdf,docx``).
+      - packer-source mit ``var_scope ∈ {team, user}``.
 
-    Returns: (os_type, mode, multi, scope). Genau einer von ``mode`` und
-    ``scope`` wird je nach Type befüllt — ``mode`` für die klassischen
-    OpenStack-Resourcen, ``scope`` für ``@openstack:file:<scope>``. Die
-    ungenutzten Felder bleiben ``None`` und die jeweils unzutreffenden
-    Defaults werden in ``_apply_defaults`` aufgesetzt.
+    Returns: ``(os_type, mode, multi, file_scope, var_scope, file_exts)``.
+
+    * ``os_type``     — None, wenn der Marker leer-type war (= reiner
+                        var_scope-Marker).
+    * ``mode``        — nur für non-file gesetzt.
+    * ``multi``       — nur für non-file gesetzt.
+    * ``file_scope``  — nur für file gesetzt (``all``/``team``/``user``).
+    * ``var_scope``   — generischer Scope (``all``/``team``/``user``).
+                        Bei file-Variablen spiegelt das den ``file_scope``,
+                        damit der Wizard EINE einzige Quelle für Slot-
+                        Auflösung hat.
+    * ``file_exts``   — nur für file gesetzt: Liste erlaubter Endungen,
+                        z.B. ``["pdf", "docx"]``. Reihenfolge stabil
+                        gemäß Marker-Reihenfolge.
     """
     if not description:
-        return (None, None, None, None)
+        return (None, None, None, None, None, None)
 
-    # Vier+ Segmente sind nie legitim. Schnellt zuerst durch, BEVOR der
-    # Haupt-Regex (der nach 3 Slots aufhört) das gar nicht mitkriegt.
+    # Sechs+ Segmente (also fünf+ Doppelpunkte nach ``@openstack:``) sind
+    # nie legitim. Schnellt zuerst durch, BEVOR der Haupt-Regex (der
+    # nach 4 Slots aufhört) das gar nicht mitkriegt.
     if _TOO_MANY_SEGMENTS_RE.search(description):
         raise MarkerError(
             var_name,
             "marker hat zu viele Segmente — erlaubt: "
-            "@openstack:<type>[:<mode>][:<multi>]",
+            "@openstack:<type>[:<mode>][:<multi>][:<var_scope>]",
         )
 
     matches = list(_MARKER_RE.finditer(description))
@@ -245,25 +299,22 @@ def _parse_marker(
             raise MarkerError(
                 var_name,
                 "marker konnte nicht geparst werden — erlaubt ist nur "
-                "``@openstack:<type>[:<mode>][:<multi>]`` mit Doppelpunkten "
-                "als Trenner und ohne Whitespace zwischen den Segmenten",
+                "``@openstack:<type>[:<mode>][:<multi>][:<var_scope>]`` mit "
+                "Doppelpunkten als Trenner und ohne Whitespace zwischen "
+                "den Segmenten",
             )
-        return (None, None, None, None)
+        return (None, None, None, None, None, None)
 
-    # Erster Marker mit BEKANNTEM Type gewinnt. Marker mit unbekanntem
-    # Type werden übersprungen (toleriert): wenn Apps in der Description
-    # historische Marker-Beispiele erwähnen wie ``@openstack:vm`` (kein
-    # OS-Resource-Type), darf der echte ``@openstack:network`` zwei
-    # Sätze später trotzdem greifen. ABER: wir merken uns den ersten
-    # Marker mit gültiger Syntax aber unbekanntem Type, um eine
-    # bessere Fehlermeldung zu geben, falls KEIN Match gefunden wird.
+    # Erster Marker mit BEKANNTEM Type ODER mit leerem Type-Slot
+    # (= nur-var_scope-Marker) gewinnt. Marker mit unbekanntem,
+    # nicht-leerem Type werden übersprungen (toleriert).
     first_unknown: tuple[str, str] | None = None  # (raw_type, suggestion)
     chosen = None
     for m in matches:
         raw_type = (m.group(1) or "")
         os_type_candidate = raw_type.lower()
-        if os_type_candidate in _OS_TYPES:
-            chosen = (m, raw_type, m.group(2), m.group(3))
+        if raw_type == "" or os_type_candidate in _OS_TYPES:
+            chosen = (m, raw_type, m.group(2), m.group(3), m.group(4))
             break
         if first_unknown is None:
             first_unknown = (raw_type, _closest_match(os_type_candidate, _OS_TYPES) or "")
@@ -280,41 +331,123 @@ def _parse_marker(
             f"erwartet: {sorted(_OS_TYPES)}",
         )
 
-    _, raw_type, raw_mode, raw_multi = chosen
-    os_type = raw_type.lower()
+    _, raw_type, raw_mode, raw_multi, raw_scope = chosen
+    os_type: str | None = raw_type.lower() if raw_type else None
+
+    # Hilfs-Parser für den vierten Slot bei non-file-Markern. Wir
+    # ziehen den hoch, damit der File-Zweig später unabhängig davon
+    # entscheiden kann, ob er den Slot als Extensions oder als
+    # var_scope interpretiert.
+    def _parse_var_scope(slot: str | None) -> str | None:
+        if slot is None or slot == "":
+            return None
+        rs = slot.lower()
+        if rs in _VAR_SCOPES:
+            return rs
+        suggestion = _closest_match(rs, _VAR_SCOPES)
+        hint = f"; meintest du '{suggestion}'?" if suggestion else ""
+        raise MarkerError(
+            var_name,
+            f"ungültiger var_scope '{slot}'{hint} — erwartet "
+            f"{sorted(_VAR_SCOPES)}",
+        )
+
+    # Nur-var_scope-Marker (``@openstack:::team``): kein Type, kein
+    # Mode, kein Multi — der Marker hat ausschließlich Scope-Bedeutung.
+    # Wir verlangen, dass der vierte Slot belegt ist, sonst ist es ein
+    # leerer Marker und damit ein Author-Fehler.
+    if os_type is None:
+        if (raw_mode not in (None, "")) or (raw_multi not in (None, "")):
+            raise MarkerError(
+                var_name,
+                "leerer type-slot ist nur in Kombination mit ``var_scope`` "
+                "erlaubt (z.B. ``@openstack:::team``); mode/multi sind hier "
+                "nicht zulässig",
+            )
+        var_scope = _parse_var_scope(raw_scope)
+        if var_scope is None:
+            raise MarkerError(
+                var_name,
+                "leerer Marker — entweder einen resource-type angeben "
+                "(z.B. ``@openstack:flavor``) oder einen var_scope "
+                "(z.B. ``@openstack:::team``)",
+            )
+        if source == "packer" and var_scope in ("team", "user"):
+            raise MarkerError(
+                var_name,
+                f"packer-Variablen unterstützen nur ``var_scope = all``; "
+                f"angegeben: '{var_scope}'. Begründung: Packer baut EIN "
+                f"Image, das von allen späteren VMs/Teams/Usern geteilt "
+                f"wird — ein Per-Team-Wert hätte keine Wirkung.",
+            )
+        return (None, None, None, None, var_scope, None)
 
     # File-Marker hat seine eigene Slot-Semantik: der Mode-Slot trägt
-    # den Scope (``all``/``team``/``user``), der Multi-Slot ist heute
-    # ungenutzt und MUSS leer bleiben. Wir handlen das hier separat,
-    # damit die generische Mode/Multi-Logik darunter unverändert bleibt
-    # und die normalen OpenStack-Resource-Types weiterhin sauber
-    # validiert werden.
+    # den Scope (``all``/``team``/``user``), der Multi-Slot trägt den
+    # PFLICHT-Endungsfilter (``pdf`` oder ``pdf|docx``). Wir handlen
+    # das hier separat, damit die generische Mode/Multi-Logik darunter
+    # unverändert bleibt.
     if os_type == "file":
-        scope: str | None = None
+        if source == "packer":
+            # Packer baut ein Image — File-Variablen würden im Build
+            # gar nicht ankommen (der Files-Pfad mergt heute hartcodiert
+            # in ``userInputVar.terraform``). Statt einer stillen
+            # Falle: Marker-Fehler.
+            raise MarkerError(
+                var_name,
+                "``@openstack:file`` ist in Packer-Variablen nicht "
+                "unterstützt — Dateien werden ausschließlich im "
+                "Terraform-Pfad zugestellt",
+            )
+
+        file_scope: str | None = None
         if raw_mode is not None and raw_mode != "":
             rs = raw_mode.lower()
             if rs in _FILE_SCOPES:
-                scope = rs
+                file_scope = rs
             else:
                 scope_suggestion = _closest_match(rs, _FILE_SCOPES)
                 hint = f"; meintest du '{scope_suggestion}'?" if scope_suggestion else ""
                 raise MarkerError(
                     var_name,
-                    f"ungültiger scope '{raw_mode}'{hint} — erwartet "
+                    f"ungültiger file-scope '{raw_mode}'{hint} — erwartet "
                     f"{sorted(_FILE_SCOPES)}",
                 )
-        # Multi-Slot ist heute reserviert; jeder explizite Wert
-        # (``:multi``/``:single``/Tippfehler) ist ein klarer Author-
-        # Fehler. Wir lehnen ihn mit Hint ab, damit das Feld später
-        # für Multi-File-pro-Slot-Support frei bleibt.
-        if raw_multi not in (None, ""):
+
+        # Multi-Slot ist jetzt der Pflicht-Extensions-Filter. Ein leerer
+        # Slot ist Fehler — File-Variablen brauchen eine explizite
+        # Erlaubnisliste, damit der Wizard im ``accept``-Attribut filtern
+        # kann und der Backend-Upload einen klaren Validierungspfad hat.
+        if raw_multi in (None, ""):
             raise MarkerError(
                 var_name,
-                f"@openstack:file akzeptiert keinen multi-Flag "
-                f"(angegeben: '{raw_multi}') — schreib den Marker als "
-                f"``@openstack:file:<scope>``",
+                "``@openstack:file`` braucht einen Endungsfilter im "
+                "vierten Slot, z.B. ``@openstack:file:all:pdf`` oder "
+                "``@openstack:file:user:pdf|docx``",
             )
-        return (os_type, None, None, scope)
+        exts_raw = raw_multi.lower()
+        if not _FILE_EXTENSIONS_RE.match(exts_raw):
+            raise MarkerError(
+                var_name,
+                f"ungültiger Endungsfilter '{raw_multi}' — erlaubt sind "
+                f"alphanumerische Endungen, mehrere getrennt mit '|' "
+                f"(z.B. ``pdf|docx``)",
+            )
+        file_exts = exts_raw.split("|")
+
+        # Vierter Slot ist bei File-Variablen reserviert — ein expliziter
+        # Wert dort wäre kollidierend mit dem Extensions-Slot. Lehnen wir
+        # ab, damit Autoren wissen, dass es bei File-Markern keinen
+        # separaten ``var_scope``-Slot gibt (der Scope steht im Mode-Slot).
+        if raw_scope not in (None, ""):
+            raise MarkerError(
+                var_name,
+                f"@openstack:file akzeptiert keinen fünften Slot "
+                f"(angegeben: '{raw_scope}') — der Scope steht im "
+                f"dritten Slot (z.B. ``@openstack:file:user:pdf``)",
+            )
+
+        return (os_type, None, None, file_scope, file_scope, file_exts)
 
     mode: str | None = None
     if raw_mode is not None:
@@ -394,7 +527,20 @@ def _parse_marker(
             "(eine list/set/tuple-Kollektion) — fixe einen der beiden",
         )
 
-    return (os_type, mode, multi, None)
+    # Vierter Slot bei non-file-Markern: der allgemeine ``var_scope``.
+    # Validierung passiert in ``_parse_var_scope`` (definiert oben in
+    # diesem Funktions-Body); Default-Auflösung in ``_apply_defaults``.
+    var_scope = _parse_var_scope(raw_scope)
+    if source == "packer" and var_scope in ("team", "user"):
+        raise MarkerError(
+            var_name,
+            f"packer-Variablen unterstützen nur ``var_scope = all``; "
+            f"angegeben: '{var_scope}'. Begründung: Packer baut EIN "
+            f"Image, das von allen späteren VMs/Teams/Usern geteilt "
+            f"wird — ein Per-Team-Wert hätte keine Wirkung.",
+        )
+
+    return (os_type, mode, multi, None, var_scope, None)
 
 
 def _apply_defaults(
@@ -488,6 +634,35 @@ def _validate_file_var_shape(var_name: str, var_type: str, scope: str) -> None:
         )
 
 
+def _validate_scoped_var_shape(var_name: str, var_type: str, scope: str) -> None:
+    """Verify a non-file variable marked with ``var_scope = team|user``
+    has a map-typed HCL declaration.
+
+    Reasoning: bei ``team``/``user``-Scope schickt der Wizard eine Map
+    (slot_key → value) an Terraform/Packer. Wenn der HCL-Type ein
+    Skalar ist (``string``, ``number``, ...), würde Terraform die Map
+    beim Apply ablehnen. Wir fangen das hier ab, damit der App-Autor
+    den Fehler bei ``GET /apps/{id}/variables`` sieht und nicht erst
+    beim ersten Deploy.
+
+    Bei ``scope = all`` (oder fehlendem Scope) gilt das nicht — dann
+    rendert der Wizard genau EIN Eingabefeld, das wie heute direkt
+    als Skalar oder Liste an Terraform durchgereicht wird.
+    """
+    if scope not in ("team", "user"):
+        return
+    type_normalised = (var_type or "").strip().lower().replace(" ", "")
+    if not type_normalised.startswith("map(") and type_normalised not in ("map",):
+        raise MarkerError(
+            var_name,
+            f"marker deklariert ``var_scope = {scope}``, aber HCL-Type "
+            f"ist '{var_type}'. Pro Scope-Eintrag liefert der Wizard "
+            f"eine Map (slot_key → value), also muss der HCL-Type "
+            f"``map(...)`` sein — z.B. ``map(string)`` oder "
+            f"``map(list(string))``.",
+        )
+
+
 def _parse_one_variable(
     *,
     var_name: str,
@@ -538,7 +713,14 @@ def _parse_one_variable(
     # in EINER Variablen-Description darf nicht den gesamten Wizard
     # blockieren; der Fehler reist im Payload mit der Variablen mit.
     try:
-        os_type, raw_mode, raw_multi, scope = _parse_marker(var_name, var_type, description)
+        (
+            os_type,
+            raw_mode,
+            raw_multi,
+            file_scope,
+            var_scope,
+            file_exts,
+        ) = _parse_marker(var_name, var_type, description, source=source)
         # File-Variablen haben eine harte Vertragsschnittstelle gegenüber
         # cloud-init: der Wizard muss wissen, ob er einen Single-Slot
         # (scope=all), eine Map über Teams oder eine Map über User
@@ -548,7 +730,9 @@ def _parse_one_variable(
         # eine klare Fehlermeldung statt eines stack-traces im
         # Worker-Log.
         if os_type == "file":
-            _validate_file_var_shape(var_name, var_type, scope or "all")
+            _validate_file_var_shape(var_name, var_type, file_scope or "all")
+        elif var_scope:
+            _validate_scoped_var_shape(var_name, var_type, var_scope)
     except MarkerError as exc:
         line = _line_number_at(file_content, var_block_offset)
         var_info["markerError"] = {
@@ -567,12 +751,24 @@ def _parse_one_variable(
             # „nicht-anwendbar" liest statt einen Default-Wert zu
             # erfinden.
             var_info["osType"] = os_type
-            var_info["osScope"] = scope or "all"
+            var_info["osScope"] = file_scope or "all"
+            if file_exts:
+                var_info["fileExtensions"] = file_exts
         else:
             mode, multi = _apply_defaults(os_type, raw_mode, raw_multi, var_type)
             var_info["osType"] = os_type
             var_info["osMode"] = mode
             var_info["osMulti"] = multi
+
+    # ``varScope`` ist orthogonal zum Resource-Type — auch eine
+    # Free-Text-Variable (kein ``osType``) kann scoped sein.
+    # Für File-Variablen spiegeln wir den ``osScope`` zusätzlich in
+    # ``varScope``, damit das Frontend für Slot-Berechnung nur EINE
+    # Quelle lesen muss.
+    if var_scope:
+        var_info["varScope"] = var_scope
+    elif os_type == "file":
+        var_info["varScope"] = file_scope or "all"
 
     return var_info
 
@@ -701,6 +897,58 @@ def get_app(
 # ----------------------------------------------------------------
 # GET APP VARIABLES
 # ----------------------------------------------------------------
+def load_variable_definitions(app, version: str) -> list[dict[str, Any]]:
+    """Clone the app's release-vars and parse all Terraform/Packer
+    variables into the same shape ``GET /apps/{id}/variables`` returns.
+
+    Reusable from ``POST /deployments`` so the deployment endpoint can
+    enforce per-variable contracts (``varScope``, ``fileExtensions``)
+    using the App-Autor's declarations as source-of-truth. Cleans up
+    the temporary clone on its own — callers don't manage paths.
+
+    Raises ``HTTPException(400)`` if the app has no Git link and
+    bubbles unexpected errors as ``HTTPException(500)``.
+    """
+    logger = logging.getLogger(__name__)
+    if not app.git_link:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="App has no Git repository configured",
+        )
+
+    deployment_id = f"vars_{app.appId}_{version}".replace("/", "_")
+    repo_path = None
+    try:
+        repo_path = git_service.clone_release_vars(app.git_link, version, deployment_id)
+        variables: list[dict[str, Any]] = []
+        tf_vars_path = os.path.join(repo_path, "terraform", "variables.tf")
+        if os.path.exists(tf_vars_path):
+            variables.extend(_parse_terraform_variables(tf_vars_path))
+        packer_vars_path = os.path.join(repo_path, "packer", "variables.pkr.hcl")
+        if os.path.exists(packer_vars_path):
+            variables.extend(_parse_packer_variables(packer_vars_path))
+        return variables
+    except HTTPException:
+        raise
+    except Exception:
+        logger.exception(
+            "Failed to load variable definitions for app %s version %s",
+            app.appId, version,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to fetch variables",
+        )
+    finally:
+        if repo_path:
+            try:
+                git_service.cleanup_repository(repo_path)
+            except Exception as cleanup_error:
+                logger.error(
+                    "Failed to cleanup repository: %s", str(cleanup_error)
+                )
+
+
 @router.get("/{app_id}/variables", response_model=list[dict[str, Any]])
 def get_app_variables(
     app_id: UUID,
@@ -729,67 +977,24 @@ def get_app_variables(
     # Check access permission
     ensure_resource_access(app.userId, current_user)
 
-    if not app.git_link:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="App has no Git repository configured"
-        )
-
     logger = logging.getLogger(__name__)
-    deployment_id = f"vars_{app_id}_{version}".replace("/", "_")
-    repo_path = None
+    variables = load_variable_definitions(app, version)
+    if not variables:
+        logger.warning("No variables found for app %s version %s", app_id, version)
 
-    try:
-        # Clone repository with sparse checkout (only variable files)
-        repo_path = git_service.clone_release_vars(app.git_link, version, deployment_id)
-
-        variables = []
-
-        # Parse Terraform variables
-        tf_vars_path = os.path.join(repo_path, "terraform", "variables.tf")
-        if os.path.exists(tf_vars_path):
-            logger.info(f"Parsing Terraform variables from {tf_vars_path}")
-            variables.extend(_parse_terraform_variables(tf_vars_path))
-
-        # Parse Packer variables
-        packer_vars_path = os.path.join(repo_path, "packer", "variables.pkr.hcl")
-        if os.path.exists(packer_vars_path):
-            logger.info(f"Parsing Packer variables from {packer_vars_path}")
-            variables.extend(_parse_packer_variables(packer_vars_path))
-
-        if not variables:
-            logger.warning(f"No variables found in {repo_path}")
-
-        # Marker-Fehler reisen pro Variable im ``markerError``-Feld mit
-        # — der Endpoint wirft kein 400 mehr für einzelne Marker-Bugs,
-        # sondern überlässt dem Frontend die Anzeige inline. Ein bug-
-        # behaftetes Marker → eine Variable als Free-Text + Inline-Hint;
-        # alle anderen Variablen bleiben benutzbar.
-        bad = [v for v in variables if v.get("markerError")]
-        if bad:
-            logger.warning(
-                "App %s version %s has %d variable(s) with bad @openstack markers: %s",
-                app_id, version, len(bad), [v["name"] for v in bad],
-            )
-
-        return variables
-
-    except HTTPException:
-        raise
-    except Exception:
-        logger.exception(f"Failed to get variables for app {app_id} version {version}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to fetch variables",
+    # Marker-Fehler reisen pro Variable im ``markerError``-Feld mit
+    # — der Endpoint wirft kein 400 mehr für einzelne Marker-Bugs,
+    # sondern überlässt dem Frontend die Anzeige inline. Ein bug-
+    # behaftetes Marker → eine Variable als Free-Text + Inline-Hint;
+    # alle anderen Variablen bleiben benutzbar.
+    bad = [v for v in variables if v.get("markerError")]
+    if bad:
+        logger.warning(
+            "App %s version %s has %d variable(s) with bad @openstack markers: %s",
+            app_id, version, len(bad), [v["name"] for v in bad],
         )
-    finally:
-        # Always cleanup cloned repository
-        if repo_path:
-            try:
-                git_service.cleanup_repository(repo_path)
-                logger.info(f"Cleaned up repository at {repo_path}")
-            except Exception as cleanup_error:
-                logger.error(f"Failed to cleanup repository: {str(cleanup_error)}")
+
+    return variables
 
 
 # ----------------------------------------------------------------

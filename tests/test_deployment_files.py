@@ -99,7 +99,7 @@ def test_post_deployment_persists_files_under_terraform(
     # The list/detail responses strip file bytes — but metadata
     # survives so the UI can render "uploaded: aufgabe.pdf".
     file_var = body["userInputVar"]["terraform"]["task_pdf"]
-    upload = file_var["all"]["uploaded"]
+    upload = file_var["all"]
     assert upload["name"] == "aufgabe.pdf"
     assert upload["size"] == len(pdf)
     assert upload["content_type"] == "application/pdf"
@@ -111,7 +111,7 @@ def test_post_deployment_persists_files_under_terraform(
         Deployment.deploymentId == uuid.UUID(body["deploymentId"])
     ).one()
     persisted = json.loads(deployment.userInputVar)
-    assert persisted["terraform"]["task_pdf"]["all"]["uploaded"]["content_b64"] == _b64(pdf)
+    assert persisted["terraform"]["task_pdf"]["all"]["content_b64"] == _b64(pdf)
     # Existing terraform vars were preserved through the merge.
     assert persisted["terraform"]["some_other"] == "x"
 
@@ -119,7 +119,7 @@ def test_post_deployment_persists_files_under_terraform(
     # the DB.
     celery_args = patched_celery.call_args.kwargs.get("args") or patched_celery.call_args.args[1]
     user_vars_arg = celery_args[4]
-    assert user_vars_arg["terraform"]["task_pdf"]["all"]["uploaded"]["content_b64"] == _b64(pdf)
+    assert user_vars_arg["terraform"]["task_pdf"]["all"]["content_b64"] == _b64(pdf)
 
 
 @pytest.mark.api
@@ -216,7 +216,7 @@ def test_detail_endpoint_strips_file_bytes(
     ).json()
 
     detail = client.get(f"/deployments/{create['deploymentId']}").json()
-    upload = detail["userInputVar"]["terraform"]["task_pdf"]["all"]["uploaded"]
+    upload = detail["userInputVar"]["terraform"]["task_pdf"]["all"]
     assert upload["name"] == "x.pdf"
     assert upload["size"] == len(pdf)
     assert "content_b64" not in upload

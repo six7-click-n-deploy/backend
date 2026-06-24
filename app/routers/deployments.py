@@ -256,6 +256,7 @@ _MAX_FILE_BYTES_PER_DEPLOYMENT = 10 * 1024 * 1024
 def _attach_files_to_user_input(
     user_input_var: dict | None,
     files: dict | None,
+    variable_definitions: list[dict] | None = None,
 ) -> dict:
     """Validate and merge wizard-uploaded files into ``userInputVar``.
 
@@ -274,6 +275,11 @@ def _attach_files_to_user_input(
       * decoded size matches the declared ``size`` (within rounding —
         client may have set it before encoding so we accept ±1)
       * per-file cap and total deployment cap
+      * if ``variable_definitions`` are provided and a file variable
+        declares ``fileExtensions``, each uploaded filename's suffix
+        (lowercased, after the last dot) must be in the allowed list.
+        Defense-in-depth: the wizard's ``accept`` attribute already
+        filters in the picker, but a hand-crafted POST could bypass it.
 
     Raises ``HTTPException(413)`` for size violations and
     ``HTTPException(422)`` for malformed payload — Pydantic already
@@ -286,6 +292,17 @@ def _attach_files_to_user_input(
 
     if not files:
         return base
+
+    # Build an index var_name → allowed_extensions for the extension
+    # check below. Variables without ``fileExtensions`` skip the
+    # filter — keeps backward compatibility for any caller that doesn't
+    # supply ``variable_definitions``.
+    allowed_exts_by_var: dict[str, list[str]] = {}
+    if variable_definitions:
+        for vdef in variable_definitions:
+            exts = vdef.get("fileExtensions")
+            if exts:
+                allowed_exts_by_var[vdef["name"]] = [e.lower() for e in exts]
 
     total_bytes = 0
     terraform_block = dict(base.get("terraform") or {})
@@ -315,6 +332,27 @@ def _attach_files_to_user_input(
             # already (FastAPI deserialised the request body into
             # ``DeploymentCreate``) — pull fields off attributes.
             content_b64 = upload.content_b64
+
+            # Extension-Filter check — only when the App-Autor declared
+            # an ``@openstack:file:<scope>:<exts>`` filter. We compare
+            # the filename suffix (after the last dot, lowercased) to
+            # the allowed list. Missing dot or unknown suffix → 422.
+            allowed_exts = allowed_exts_by_var.get(var_name)
+            if allowed_exts is not None:
+                name = upload.name or ""
+                dot = name.rfind(".")
+                suffix = name[dot + 1 :].lower() if dot >= 0 else ""
+                if suffix not in allowed_exts:
+                    raise HTTPException(
+                        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                        detail={
+                            "reason": "file_extension_rejected",
+                            "variable": var_name,
+                            "slot": slot_key,
+                            "filename": upload.name,
+                            "allowed": allowed_exts,
+                        },
+                    )
             try:
                 # ``validate=True`` would reject any non-base64
                 # whitespace; the wizard sends compact base64 so this
@@ -364,22 +402,130 @@ def _attach_files_to_user_input(
                     },
                 )
 
-            # The terraform-side wrapper is a map so an app dev can
-            # later add a second file per slot without breaking
-            # existing templates. Today we always emit a single
-            # entry under the conventional key ``"uploaded"``.
+            # Map shape exactly to the HCL contract documented for
+            # ``@openstack:file:<scope>`` markers — one ``object``
+            # per slot, no extra wrapper. The earlier
+            # ``{slot: {"uploaded": {...}}}`` indirection was meant
+            # to leave room for multi-file-per-slot, but that would
+            # need a different HCL type (``list(object(...))``)
+            # anyway, so the wrapper bought nothing and forced every
+            # template to either tolerate the alien layer or fail
+            # validation with "attribute X is required" the way
+            # this deploy did.
             encoded_slots[slot_key] = {
-                "uploaded": {
-                    "name": upload.name,
-                    "content_b64": content_b64,
-                    "size": upload.size,
-                    "content_type": upload.content_type or "application/octet-stream",
-                }
+                "name": upload.name,
+                "content_b64": content_b64,
+                "size": upload.size,
+                "content_type": upload.content_type or "application/octet-stream",
             }
         terraform_block[var_name] = encoded_slots
 
     base["terraform"] = terraform_block
     return base
+
+
+def _validate_scoped_user_input(
+    user_input_var: dict | None,
+    variable_definitions: list[dict],
+    teams_payload: list,
+) -> None:
+    """Enforce that variables marked with ``varScope = team|user``
+    arrive as a map whose keys match the deployment's team / user roster.
+
+    Reasoning: the wizard packs scoped variables as a Map
+    (``{slot_key: value, ...}``) and ships them via ``userInputVar``.
+    A hand-crafted POST could ship arbitrary keys; we want unknown
+    Scope-Targets to fail fast and loud before they hit Terraform,
+    where the error would be a confusing "module: invalid for_each
+    key" deep in the worker log.
+
+    File variables are skipped here — they go through
+    :func:`_attach_files_to_user_input` which has its own per-slot
+    validation and already lives at the right layer.
+
+    Raises ``HTTPException(422)`` with ``reason="unknown_scope_target"``
+    or ``reason="scoped_var_not_map"`` for shape/identity problems.
+    """
+    if not user_input_var:
+        return
+
+    # Compose the universe of valid slot keys per scope. ``team``
+    # accepts any team name; ``user`` accepts ``TeamName-Username``
+    # composites — mirror of ``userSlotKey`` in the wizard.
+    team_names: set[str] = set()
+    user_slot_keys: set[str] = set()
+    for team in teams_payload or []:
+        team_name = getattr(team, "name", None) or (team.get("name") if isinstance(team, dict) else None)
+        if not team_name:
+            continue
+        team_names.add(team_name)
+        # ``team.userIds`` contains UUID strings here, not usernames —
+        # the deployment endpoint resolves usernames just below us
+        # when assembling ``teams_dict``. We accept any non-empty
+        # composite key prefix-matching ``f"{team_name}-"`` for
+        # user-scoped variables, because the wizard renders one slot
+        # per member and labels it with the username (not the UUID).
+        # A stricter check would require an extra DB round-trip; the
+        # prefix-and-non-empty check is enough to catch typos and
+        # cross-team key smuggling.
+    # NB: ``user_slot_keys`` stays empty — we use the team-prefix
+    # check below instead. That's a deliberate trade: cheap and
+    # immediate, vs. a per-username round-trip we'd otherwise need.
+
+    for source_key in ("terraform", "packer"):
+        block = user_input_var.get(source_key)
+        if not isinstance(block, dict):
+            continue
+        for vdef in variable_definitions:
+            if vdef.get("source") != source_key:
+                continue
+            if vdef.get("osType") == "file":
+                continue  # handled by _attach_files_to_user_input
+            scope = vdef.get("varScope")
+            if scope not in ("team", "user"):
+                continue
+            var_name = vdef["name"]
+            value = block.get(var_name)
+            if value is None:
+                continue  # variable left at HCL default — allowed
+            if not isinstance(value, dict):
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail={
+                        "reason": "scoped_var_not_map",
+                        "variable": var_name,
+                        "scope": scope,
+                    },
+                )
+            for slot_key in value.keys():
+                if scope == "team":
+                    if slot_key not in team_names:
+                        raise HTTPException(
+                            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                            detail={
+                                "reason": "unknown_scope_target",
+                                "variable": var_name,
+                                "scope": scope,
+                                "slot": slot_key,
+                                "allowed": sorted(team_names),
+                            },
+                        )
+                else:  # user scope
+                    # Composite key ``TeamName-Username``: split on the
+                    # first ``-``, verify the prefix is a known team.
+                    sep = slot_key.find("-")
+                    prefix = slot_key[:sep] if sep > 0 else ""
+                    if prefix not in team_names:
+                        raise HTTPException(
+                            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                            detail={
+                                "reason": "unknown_scope_target",
+                                "variable": var_name,
+                                "scope": scope,
+                                "slot": slot_key,
+                                "hint": "expected ``TeamName-Username``",
+                            },
+                        )
 
 
 def _strip_file_vars_from_user_input(user_input_var: dict | None) -> dict | None:
@@ -391,11 +537,10 @@ def _strip_file_vars_from_user_input(user_input_var: dict | None) -> dict | None
     page render is wasteful. Owners who actually want the file fetch
     it via the dedicated download endpoint.
 
-    Heuristic-based: a file slot is a dict whose values look like
-    the wrapped-upload shape (``{"uploaded": {"content_b64": ...}}``).
-    We don't carry the marker-derived schema into this layer to keep
-    it cheap; matching on the wrapper is enough because no other
-    user-input shape uses ``content_b64`` keys.
+    Heuristic-based: a variable is a file slot when its value is a
+    mapping whose entries each carry a ``content_b64`` field — the
+    same shape ``_attach_files_to_user_input`` writes. We match on
+    that key because no other user-input kind uses it.
     """
     if not isinstance(user_input_var, dict):
         return user_input_var
@@ -418,37 +563,41 @@ def _strip_file_vars_from_user_input(user_input_var: dict | None) -> dict | None
 
 
 def _looks_like_file_var(value) -> bool:
-    """True if ``value`` matches the wrapped-upload shape produced by
-    :func:`_attach_files_to_user_input`. Used to identify file-typed
-    variables at response-shaping time without having to consult the
-    app's variable schema. The check is intentionally conservative —
-    only structures we ourselves wrote in this format match.
+    """True if ``value`` matches the file-upload shape produced by
+    :func:`_attach_files_to_user_input`: a non-empty mapping whose
+    values are objects carrying ``content_b64`` plus the metadata
+    triplet. Used at response-shaping time to identify file-typed
+    variables without consulting the app's variable schema.
+
+    Shape examples it matches (and only these):
+
+    * ``scope=all``   → ``{"all": {name, content_b64, size, content_type}}``
+    * ``scope=team``  → ``{"Team-1": {...}, "Team-2": {...}}``
+    * ``scope=user``  → ``{"Team-1-luca": {...}, ...}``
+
+    No legacy-wrapped-shape detection — rows persisted in the old
+    ``{slot: {"uploaded": {...}}}`` indirection are dealt with by
+    hand. Keeping this strict keeps the surface tight.
     """
-    if not isinstance(value, dict):
+    if not isinstance(value, dict) or not value:
         return False
     for slot in value.values():
-        if not isinstance(slot, dict) or not slot:
+        if not isinstance(slot, dict):
             return False
-        for entry in slot.values():
-            if not isinstance(entry, dict) or "content_b64" not in entry:
-                return False
+        if "content_b64" not in slot:
+            return False
     return True
 
 
 def _file_var_metadata_only(value: dict) -> dict:
     """Return a copy of a file-shape variable with the ``content_b64``
-    bytes replaced by a stable placeholder. The metadata fields
-    (name, size, content_type) survive so the UI can list "what was
-    uploaded" without fetching the actual bytes.
+    payload stripped. Metadata fields (name, size, content_type)
+    survive so the UI can list "what was uploaded" without shipping
+    base64 megabytes on every detail-view render.
     """
     out: dict = {}
     for slot_key, slot in value.items():
-        scrubbed_slot: dict = {}
-        for upload_key, entry in slot.items():
-            scrubbed_slot[upload_key] = {
-                k: v for k, v in entry.items() if k != "content_b64"
-            }
-        out[slot_key] = scrubbed_slot
+        out[slot_key] = {k: v for k, v in slot.items() if k != "content_b64"}
     return out
 
 
@@ -490,15 +639,44 @@ def create_deployment(
             detail={"reason": "app_not_found_or_deleted"},
         )
 
+    # Load the App-Autor's variable declarations so we can enforce
+    # per-variable contracts (``varScope``, ``fileExtensions``) below.
+    # We only do this when the request actually carries variables /
+    # files — for a no-input deploy the round-trip into Git would be
+    # waste. Same parser as ``GET /apps/{id}/variables`` so client and
+    # server agree on which variable is scoped/file/free-text.
+    variable_definitions: list[dict] = []
+    if deployment.userInputVar or deployment.files:
+        from app.routers.apps import load_variable_definitions
+        release_tag = deployment.releaseTag or "main"
+        try:
+            variable_definitions = load_variable_definitions(target_app, release_tag)
+        except HTTPException:
+            # Re-raise — the helper already produces a sensible error.
+            raise
+
     # Fold the wizard's parallel ``files`` upload into
     # ``userInputVar.terraform`` before the row gets persisted, so the
     # rest of this handler — and the worker downstream — sees one
     # uniform dict. The helper validates base64 / size / per-file and
     # per-deployment caps; any failure short-circuits with a 4xx and
-    # the row never enters the DB.
+    # the row never enters the DB. When variable definitions are
+    # available, the helper also enforces the App-Autor's declared
+    # ``fileExtensions`` filter on each upload name.
     deployment.userInputVar = _attach_files_to_user_input(
-        deployment.userInputVar, deployment.files
+        deployment.userInputVar, deployment.files, variable_definitions or None,
     )
+
+    # Enforce ``varScope = team|user`` contracts: each value must be a
+    # map whose keys match the deployment's team / user roster. This
+    # is defense-in-depth — the wizard already only renders slots the
+    # user can fill, but a hand-crafted POST could ship unknown keys.
+    if variable_definitions:
+        _validate_scoped_user_input(
+            deployment.userInputVar,
+            variable_definitions,
+            deployment.teams or [],
+        )
 
     db_deployment = crud_deployments.create_deployment(
         db, deployment, current_user.userId
@@ -990,19 +1168,13 @@ def download_deployment_file(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"No uploaded file under variable '{var_name}'",
         )
-    slot = var_value.get(slot_key)
-    if not isinstance(slot, dict) or not slot:
+    # ``var_value`` is ``{slot_key: {name, content_b64, size, content_type}}``;
+    # the slot-level entry IS the file metadata, no extra wrapper.
+    entry = var_value.get(slot_key)
+    if not isinstance(entry, dict) or "content_b64" not in entry:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"No file in slot '{slot_key}'",
-        )
-    # Today every slot holds exactly one entry under key "uploaded";
-    # the inner-map shape is reserved for future multi-file support
-    # so we don't hardcode that key here — pick the only one.
-    entry = next(iter(slot.values()))
-    if not isinstance(entry, dict) or "content_b64" not in entry:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND, detail="File data missing",
         )
 
     try:
