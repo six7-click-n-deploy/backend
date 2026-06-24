@@ -8,6 +8,8 @@ from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from fastapi.responses import JSONResponse, StreamingResponse
 from sqlalchemy.orm import Session
 
+from app.crud import app_version_approvals as crud_approvals
+from app.crud import apps as crud_apps
 from app.crud import deployments as crud_deployments
 from app.crud import locks as crud_locks
 from app.crud import openstack_credentials as crud_openstack_credentials
@@ -247,18 +249,32 @@ def create_deployment(
     # until the next COMMIT/ROLLBACK on this connection.
     crud_locks.acquire_user_xact_lock(db, current_user.userId)
 
-    # Refuse the create if the target app is soft-deleted. Existing
-    # deployments referencing the app keep working (so destroy still
-    # has a handle on their resources) but no new deploys can be
-    # started — that's the whole point of soft-deleting an app:
-    # retire it without breaking what already runs against it.
-    from app.crud import apps as crud_apps
+    # Refuse the create if the target app is soft-deleted.
     target_app = crud_apps.get_app(db, deployment.appId)
     if target_app is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail={"reason": "app_not_found_or_deleted"},
         )
+
+    # Enforce the release workflow:
+    # - Private apps: only the creator may deploy (all versions allowed).
+    # - Public apps: the requested releaseTag must have an APPROVED entry.
+    if target_app.is_private:
+        if str(target_app.userId) != str(current_user.userId):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail={"reason": "app_is_private"},
+            )
+    else:
+        release_tag = deployment.releaseTag
+        if not release_tag or not crud_approvals.has_approved_version(
+            db, target_app.appId, release_tag
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail={"reason": "version_not_approved"},
+            )
 
     db_deployment = crud_deployments.create_deployment(
         db, deployment, current_user.userId

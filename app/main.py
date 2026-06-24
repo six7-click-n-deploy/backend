@@ -8,6 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import settings
 from app.routers import (
+    admin_apps,
     apps,
     auth_keycloak,
     courses,
@@ -98,6 +99,7 @@ app.include_router(auth_keycloak.router, prefix="/auth", tags=["Authentication"]
 app.include_router(users.router, prefix="/users", tags=["Users"])
 app.include_router(courses.router, prefix="/courses", tags=["Courses"])
 app.include_router(apps.router, prefix="/apps", tags=["Apps"])
+app.include_router(admin_apps.router, prefix="/admin", tags=["Admin"])
 app.include_router(deployments.router, prefix="/deployments", tags=["Deployments"])
 app.include_router(tasks.router, prefix="/tasks", tags=["Tasks"])
 app.include_router(teams.router, prefix="/teams", tags=["Teams"])

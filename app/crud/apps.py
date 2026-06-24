@@ -3,7 +3,7 @@ from uuid import UUID
 
 from sqlalchemy.orm import Session
 
-from app.models import App
+from app.models import App, AppVersionApproval, AppVersionApprovalStatus
 from app.schemas import AppCreate, AppUpdate
 
 
@@ -34,8 +34,6 @@ def get_apps(
     query = db.query(App)
 
     if not include_deleted:
-        # Backed by the partial index ix_apps_live so listing stays
-        # cheap even with a long history.
         query = query.filter(App.deleted_at.is_(None))
     if user_id:
         query = query.filter(App.userId == user_id)
@@ -43,17 +41,50 @@ def get_apps(
     return query.offset(skip).limit(limit).all()
 
 
-def create_app(db: Session, app: AppCreate, user_id: UUID) -> App:
-    """Create a new app.
+def get_visible_apps(
+    db: Session,
+    requesting_user_id: UUID,
+    skip: int = 0,
+    limit: int = 100,
+) -> list[App]:
+    """Return apps visible to the requesting user.
 
-    The image is set via the dedicated ``set_app_image`` helper after
-    the row exists so the same code path covers create + update.
+    Visibility rules:
+    - Always: apps owned by the requesting user (regardless of is_private)
+    - Additionally: public apps (is_private=False) that have at least one
+      APPROVED version
     """
+    approved_app_ids = (
+        db.query(AppVersionApproval.appId)
+        .filter(AppVersionApproval.status == AppVersionApprovalStatus.APPROVED)
+        .distinct()
+        .scalar_subquery()
+    )
+
+    return (
+        db.query(App)
+        .filter(App.deleted_at.is_(None))
+        .filter(
+            (App.userId == requesting_user_id)
+            | (
+                (App.is_private == False)  # noqa: E712
+                & App.appId.in_(approved_app_ids)
+            )
+        )
+        .offset(skip)
+        .limit(limit)
+        .all()
+    )
+
+
+def create_app(db: Session, app: AppCreate, user_id: UUID) -> App:
+    """Create a new app."""
     db_app = App(
         name=app.name,
         description=app.description,
         git_link=app.git_link,
-        userId=user_id
+        is_private=app.is_private,
+        userId=user_id,
     )
     db.add(db_app)
     db.commit()
