@@ -99,12 +99,21 @@ def update_app(db: Session, app_id: UUID, app_update: AppUpdate) -> App | None:
     decodes the data-URL via ``parse_image_data_url`` and calls
     ``set_app_image`` directly. ``model_dump`` would otherwise pass
     the data-URL string straight into the ``LargeBinary`` column.
+
+    ``git_link`` is intentionally excluded as well: once an app has
+    deployments, changing the repo would make existing deployments
+    point at a different repo than they originally deployed.
+    ``AppUpdate`` already drops the field from the schema; this
+    exclude is defense-in-depth in case the schema is replaced or
+    extended later.
     """
     db_app = get_app(db, app_id)
     if not db_app:
         return None
 
-    update_data = app_update.model_dump(exclude_unset=True, exclude={"image"})
+    update_data = app_update.model_dump(
+        exclude_unset=True, exclude={"image", "git_link"}
+    )
     for field, value in update_data.items():
         setattr(db_app, field, value)
 
