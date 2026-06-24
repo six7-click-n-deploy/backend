@@ -41,20 +41,20 @@ async def lifespan(app: FastAPI):
     # the pubsub from a non-asyncio thread; without a loop reference
     # those pushes would be silently dropped.
     pubsub.set_loop(asyncio.get_running_loop())
-    logger.info("✓ Deployment pubsub bound to event loop")
+    logger.info("Deployment pubsub bound to event loop")
 
     # Start Celery event listener in background thread
     listener_thread = threading.Thread(target=start_event_listener, daemon=True)
     listener_thread.start()
-    logger.info("✓ Celery event listener started in background")
+    logger.info("Celery event listener started in background")
 
     # Reconciler is the safety net for events the listener missed (lost
     # event, backend restart during dispatch, broker hiccups). It runs
     # as an asyncio task so we can cancel it cleanly on shutdown.
     reconciler_task = asyncio.create_task(run_reconciler())
-    logger.info("✓ Reconciler loop scheduled")
+    logger.info("Reconciler loop scheduled")
 
-    logger.info("✓ Application started")
+    logger.info("Application started")
 
     try:
         yield
@@ -68,7 +68,7 @@ async def lifespan(app: FastAPI):
             pass
         except Exception:
             logger.exception("Reconciler task raised on shutdown")
-        logger.info("✓ Shutdown complete")
+        logger.info("Shutdown complete")
 
 
 # ----------------------------------------------------------------

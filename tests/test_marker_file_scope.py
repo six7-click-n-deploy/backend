@@ -370,3 +370,26 @@ def test_too_many_segments_rejected():
             "map(string)",
             "@openstack:network:id:single:team:extra",
         )
+
+
+@pytest.mark.unit
+def test_multi_with_scoped_map_uses_inner_type():
+    """Bug #1 — ``:multi:team`` mit ``map(list(string))``:
+
+    Bei ``var_scope=team`` schickt der Wizard eine Map pro Slot. Der
+    HCL-Type muss eine ``map(...)`` sein; der INNERE Element-Type
+    entscheidet, ob ``:multi`` konsistent ist. ``map(list(string))``
+    hat innen eine Liste — ``:multi`` passt. Der Marker MUSS hier
+    erfolgreich parsen.
+    """
+    os_type, mode, multi, file_scope, var_scope, file_exts = _parse_marker(
+        "team_flavor_ids",
+        "map(list(string))",
+        "@openstack:flavor:id:multi:team",
+    )
+    assert os_type == "flavor"
+    assert mode == "id"
+    assert multi is True
+    assert var_scope == "team"
+    assert file_scope is None
+    assert file_exts is None

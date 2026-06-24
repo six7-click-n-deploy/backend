@@ -3,11 +3,13 @@ import base64
 import binascii
 import json
 import logging
+import re
 from collections.abc import AsyncIterator
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from fastapi.responses import JSONResponse, StreamingResponse
+from sqlalchemy import desc
 from sqlalchemy.orm import Session
 
 from app.crud import app_version_approvals as crud_approvals
@@ -17,11 +19,14 @@ from app.crud import locks as crud_locks
 from app.crud import openstack_credentials as crud_openstack_credentials
 from app.crud import teams as crud_teams
 from app.database import get_db
+from app.models import Task as TaskModel  # for ad-hoc state queries
 from app.models import TaskStatus, TaskType, User, UserRole
 from app.schemas import (
     DeploymentCreate,
     DeploymentDetail,
     DeploymentOutputs,
+    DeploymentResourceListResponse,
+    DeploymentResourceSchema,
     DeploymentResponse,
     DeploymentTeamMember,
     DeploymentTeamResponse,
@@ -31,6 +36,10 @@ from app.services import deployment_notifier
 from app.services import lifecycle as lifecycle_service
 from app.services import task_service as task_service_module
 from app.services.deployment_pubsub import pubsub
+from app.services.deployment_status import (
+    build_resource_detail,
+    build_resource_views,
+)
 from app.utils.keycloak_auth import get_current_user_keycloak
 from app.utils.permissions import (
     ensure_deployment_access,
@@ -97,8 +106,16 @@ def list_deployments(
 
     result = []
     for deployment in deployments:
-        status_value = crud_deployments.get_deployment_status(db, deployment.deploymentId)
-        created_at = crud_deployments.get_deployment_created_at(db, deployment.deploymentId)
+        # Pull the latest-task ``(status, type)`` and the first-task
+        # timestamp out of the bulk map. Deployments without any task
+        # yet (new row, dispatch in flight) map to ``(None, None, None)``
+        # — ``derive_status`` returns None for that, which the schema
+        # accepts (``status: str | None``).
+        latest_status, latest_type, first_created_at = task_summary.get(
+            deployment.deploymentId, (None, None, None)
+        )
+        status_value = crud_deployments.derive_status(latest_status, latest_type)
+
         # Parse userInputVar JSON string back to dict if it exists.
         # File uploads are stripped down to metadata here so the list
         # view doesn't ship megabytes of base64 to the browser; the
@@ -449,12 +466,17 @@ def _validate_scoped_user_input(
     where the error would be a confusing "module: invalid for_each
     key" deep in the worker log.
 
-    File variables are skipped here — they go through
-    :func:`_attach_files_to_user_input` which has its own per-slot
-    validation and already lives at the right layer.
+    File variables are NOT skipped here — they share the same scoped
+    map shape (``{slot_key: file_obj}``) and a hand-crafted POST could
+    just as easily smuggle an unknown team name into a file-scope
+    variable. We validate slot identity against the same roster; the
+    per-file size / base64 / extension validation stays in
+    :func:`_attach_files_to_user_input` because that's the layer that
+    actually decodes the bytes.
 
-    Raises ``HTTPException(422)`` with ``reason="unknown_scope_target"``
-    or ``reason="scoped_var_not_map"`` for shape/identity problems.
+    Raises ``HTTPException(422)`` with ``reason="unknown_scope_target"``,
+    ``reason="scoped_var_not_map"``, or ``reason="required_slot_empty"``
+    for shape/identity/completeness problems.
     """
     if not user_input_var:
         return
@@ -463,7 +485,6 @@ def _validate_scoped_user_input(
     # accepts any team name; ``user`` accepts ``TeamName-Username``
     # composites — mirror of ``userSlotKey`` in the wizard.
     team_names: set[str] = set()
-    user_slot_keys: set[str] = set()
     for team in teams_payload or []:
         team_name = getattr(team, "name", None) or (team.get("name") if isinstance(team, dict) else None)
         if not team_name:
@@ -478,9 +499,40 @@ def _validate_scoped_user_input(
         # A stricter check would require an extra DB round-trip; the
         # prefix-and-non-empty check is enough to catch typos and
         # cross-team key smuggling.
-    # NB: ``user_slot_keys`` stays empty — we use the team-prefix
-    # check below instead. That's a deliberate trade: cheap and
-    # immediate, vs. a per-username round-trip we'd otherwise need.
+
+    # Longest-prefix-match helper for user-scope composite keys:
+    # ``TeamName-Username``. A naive ``slot_key.find('-')`` would
+    # truncate a team named ``Team-A`` to just ``Team``, so any team
+    # name containing a dash would be misclassified as unknown. We
+    # iterate the known team names from longest to shortest and pick
+    # the first one that either equals ``slot_key`` (empty username,
+    # rejected below) or prefixes it as ``f"{team}-"``.
+    teams_by_length = sorted(team_names, key=len, reverse=True)
+
+    def _user_slot_team_prefix(slot_key: str) -> str | None:
+        for team in teams_by_length:
+            if slot_key == team:
+                # No trailing ``-Username`` — caller treats this as a
+                # missing-user-segment and surfaces ``unknown_scope_target``.
+                return team
+            if slot_key.startswith(team + "-"):
+                return team
+        return None
+
+    def _is_empty_slot_value(val) -> bool:
+        """Treat None, empty string, empty list, and empty dict as
+        "slot not filled". The wizard would otherwise let a required
+        team/user-scoped var slip through with one team left blank,
+        which Terraform would catch with a much less actionable
+        ``Inappropriate value for attribute`` deep in the worker log.
+        """
+        if val is None:
+            return True
+        if isinstance(val, str) and val == "":
+            return True
+        if isinstance(val, (list, dict)) and len(val) == 0:
+            return True
+        return False
 
     for source_key in ("terraform", "packer"):
         block = user_input_var.get(source_key)
@@ -489,15 +541,23 @@ def _validate_scoped_user_input(
         for vdef in variable_definitions:
             if vdef.get("source") != source_key:
                 continue
-            if vdef.get("osType") == "file":
-                continue  # handled by _attach_files_to_user_input
             scope = vdef.get("varScope")
             if scope not in ("team", "user"):
                 continue
             var_name = vdef["name"]
             value = block.get(var_name)
+            is_file = vdef.get("osType") == "file"
+            required = bool(vdef.get("required"))
             if value is None:
-                continue  # variable left at HCL default — allowed
+                # File-scope vars MUST be present — the wizard always
+                # ships at least an empty map for them, so a None here
+                # is a hand-crafted-POST shape. For non-file required
+                # scoped vars, raise on the slot-completeness check
+                # below by treating the absent value as an empty map.
+                if required:
+                    value = {}
+                else:
+                    continue  # variable left at HCL default — allowed
             if not isinstance(value, dict):
                 raise HTTPException(
                     status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
@@ -521,11 +581,12 @@ def _validate_scoped_user_input(
                             },
                         )
                 else:  # user scope
-                    # Composite key ``TeamName-Username``: split on the
-                    # first ``-``, verify the prefix is a known team.
-                    sep = slot_key.find("-")
-                    prefix = slot_key[:sep] if sep > 0 else ""
-                    if prefix not in team_names:
+                    # Longest-prefix-match against known team names so
+                    # a team named ``Team-A`` parses to prefix
+                    # ``Team-A`` and rest ``Username`` instead of
+                    # prefix ``Team`` (which wouldn't be a known team).
+                    prefix = _user_slot_team_prefix(slot_key)
+                    if prefix is None or slot_key == prefix:
                         raise HTTPException(
                             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
                             detail={
@@ -536,6 +597,53 @@ def _validate_scoped_user_input(
                                 "hint": "expected ``TeamName-Username``",
                             },
                         )
+
+            # Required slot-completeness check: for required team /
+            # user scoped variables every expected slot key must carry
+            # a non-empty value. Without this an empty map (or one
+            # team left blank) would silently pass here and only fail
+            # downstream with an opaque Terraform error.
+            #
+            # File vars are skipped from the completeness sweep — the
+            # per-file size/decode validation in
+            # :func:`_attach_files_to_user_input` raises a more specific
+            # error (file_var_empty / file_b64_invalid) for them. We
+            # only checked slot identity above; the bytes themselves
+            # are validated at that layer.
+            if required and not is_file:
+                expected_slots: set[str] = set()
+                if scope == "team":
+                    expected_slots = set(team_names)
+                # For ``user`` scope we don't have the per-team member
+                # roster here (would need a DB round-trip we already
+                # avoid above), so we only enforce that each slot the
+                # caller did ship carries a non-empty value. The
+                # wizard's frontend check is the primary guard; this
+                # is defense-in-depth against hand-crafted POSTs that
+                # ship one half-filled team. A POST that omits a team
+                # entirely for a required user-scope var is caught by
+                # the team-scope branch via team_names because the
+                # wizard always emits at least one slot per team.
+
+                missing: list[str] = []
+                for slot in expected_slots:
+                    if _is_empty_slot_value(value.get(slot)):
+                        missing.append(slot)
+                # Also flag empty values among slots the caller did
+                # provide — covers user-scope and any partial-fill case.
+                for slot, val in value.items():
+                    if _is_empty_slot_value(val) and slot not in missing:
+                        missing.append(slot)
+                if missing:
+                    raise HTTPException(
+                        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                        detail={
+                            "reason": "required_slot_empty",
+                            "variable": var_name,
+                            "scope": scope,
+                            "missing_slots": sorted(missing),
+                        },
+                    )
 
 
 def _strip_file_vars_from_user_input(user_input_var: dict | None) -> dict | None:
@@ -577,7 +685,10 @@ def _looks_like_file_var(value) -> bool:
     :func:`_attach_files_to_user_input`: a non-empty mapping whose
     values are objects carrying ``content_b64`` plus the metadata
     triplet. Used at response-shaping time to identify file-typed
-    variables without consulting the app's variable schema.
+    variables without consulting the app's variable schema, AND at
+    lifecycle-dispatch time (destroy/pause/resume/redeploy) to drop
+    file vars from the worker's var-set so Terraform's schema
+    validation doesn't trip on a payload it doesn't need.
 
     Shape examples it matches (and only these):
 
@@ -585,9 +696,13 @@ def _looks_like_file_var(value) -> bool:
     * ``scope=team``  → ``{"Team-1": {...}, "Team-2": {...}}``
     * ``scope=user``  → ``{"Team-1-luca": {...}, ...}``
 
-    No legacy-wrapped-shape detection — rows persisted in the old
-    ``{slot: {"uploaded": {...}}}`` indirection are dealt with by
-    hand. Keeping this strict keeps the surface tight.
+    Strict signature: each slot must carry ``content_b64``. Rows
+    that survived an earlier response-side-strip-then-persisted
+    accident (metadata triplet only, no bytes) are NOT auto-
+    detected — clean them up by hand (delete the deployment row +
+    its pg-backend tfstate schema). The strictness is intentional:
+    a lenient detector would silently swallow legitimate non-file
+    map variables that coincidentally share the metadata key names.
     """
     if not isinstance(value, dict) or not value:
         return False
@@ -924,16 +1039,18 @@ def _dispatch_lifecycle_task(
     task_type: TaskType,
     celery_task_name: str,
     response_status: str,
+    extra_args: list | None = None,
 ):
     """Enqueue any post-deploy lifecycle worker task for a deployment.
 
-    Used by destroy, pause, and resume — all three follow the same
-    pattern: load user inputs, gather team membership, fetch the
-    encrypted OpenStack envelope, atomically insert a PENDING task row,
-    commit, then ``send_task`` outside the locked TX. On a Celery send
-    failure the task row flips to FAILED in a fresh TX (handled inside
-    ``dispatch_to_celery``) and we surface a 503 so the user sees an
-    obvious failure instead of a permanent in-flight status.
+    Used by destroy, pause, resume, and per-VM redeploy — all four
+    follow the same pattern: load user inputs, gather team membership,
+    fetch the encrypted OpenStack envelope, atomically insert a
+    PENDING task row, commit, then ``send_task`` outside the locked
+    TX. On a Celery send failure the task row flips to FAILED in a
+    fresh TX (handled inside ``dispatch_to_celery``) and we surface a
+    503 so the user sees an obvious failure instead of a permanent
+    in-flight status.
 
     Args:
         task_type:           the ``TaskType`` enum value that drives both
@@ -946,11 +1063,45 @@ def _dispatch_lifecycle_task(
                              frontend in the 202 body — frontend uses
                              this to immediately switch the UI into the
                              live-stream view without re-fetching.
+        extra_args:          additional positional args appended to the
+                             Celery payload after the standard seven.
+                             Used by ``tasks.redeploy_resource`` to pass
+                             the targeted resource address.
     """
     try:
         user_vars = json.loads(deployment.userInputVar) if deployment.userInputVar else {}
     except Exception:
         user_vars = {}
+
+    # Belt + braces: for non-deploy lifecycle tasks (destroy, pause,
+    # resume, redeploy), strip any ``@openstack:file:*`` payloads
+    # from the user-vars BEFORE they reach the worker. Files are only
+    # consumed at apply-time by cloud-init's write_files; everything
+    # else just hands the same var-set to Terraform which then
+    # validates the entire variable surface against the HCL schema.
+    # A row whose ``content_b64`` was stripped by a response-side
+    # ``_strip_file_vars_from_user_input`` pass (e.g. after a manual
+    # DB edit, an in-place row shrink, or any future code path that
+    # rewrites the persisted JSON) would otherwise crash destroy with
+    # ``element "all": attributes "content_b64", "content_type",
+    # "name", and "size" are required`` because the surviving slot
+    # violates the variable's object type. Dropping the var
+    # altogether lets Terraform fall back on the HCL default.
+    #
+    # Deploy is the only lifecycle that legitimately needs the file
+    # bytes (cloud-init writes them) — that path enters the worker
+    # via ``create_deployment`` directly, not through this helper.
+    if task_type != TaskType.DEPLOY:
+        terraform_block = user_vars.get("terraform")
+        if isinstance(terraform_block, dict):
+            user_vars = {
+                **user_vars,
+                "terraform": {
+                    k: v
+                    for k, v in terraform_block.items()
+                    if not _looks_like_file_var(v)
+                },
+            }
 
     teams_dict: dict = {}
     if deployment.teams:
@@ -1000,6 +1151,7 @@ def _dispatch_lifecycle_task(
                 user_vars,
                 teams_dict,
                 openstack_envelope,
+                *(extra_args or []),
             ],
         )
     except Exception:
@@ -1015,8 +1167,251 @@ def _dispatch_lifecycle_task(
 
 
 # ----------------------------------------------------------------
-# PAUSE DEPLOYMENT
+# INFRASTRUCTURE RESOURCES (per-deployment status + per-VM redeploy)
 # ----------------------------------------------------------------
+#
+# Three sibling endpoints power the Infrastructure tab on the
+# deployment detail page:
+#
+#   * GET /{deployment_id}/resources?refresh=…
+#       Stage-1 listing — parses the cached TF state and (default)
+#       overlays live OpenStack lifecycle/hardware/addresses per VM.
+#       Returns a flat list spanning compute, network, subnet, SG,
+#       FIP, and port categories.
+#
+#   * GET /{deployment_id}/resources/{address}
+#       Stage-2 detail — same shape, plus ports/SG-summary/volumes/
+#       metadata for ONE compute instance, identified by its TF state
+#       address (e.g. ``openstack_compute_instance_v2.team_ide["Team-A"]``).
+#       Frontend loads this lazily when the user opens a card's drawer.
+#
+#   * POST /{deployment_id}/resources/{address}/redeploy
+#       Per-VM redeploy — issues ``terraform apply -replace=<addr>
+#       -target=<addr>`` in a dedicated Celery task. Strictly
+#       address-whitelisted against the cached TF state and the
+#       compute-instance category, so a hand-crafted POST can't smuggle
+#       a network-resource target (which would tear down all team VMs).
+#
+# All three are owner-only — the data exposed (live OpenStack status,
+# the ability to bounce a VM) is not something a teammate should be
+# able to access through the deployment detail page.
+
+
+# We accept the same Terraform address vocabulary the user would type
+# on ``terraform apply -target=``: ``type.name`` with optional
+# ``[<int>]`` or ``["<string>"]`` suffix. Multiple address segments
+# (modules, nested resources) aren't supported by the current apps,
+# so we keep the regex strict to make smuggling impossible. The
+# resource-existence whitelist below is the real defense; the regex
+# is just a fast no-op rejection for obviously bad inputs (e.g.
+# pipes, semicolons, spaces).
+_TF_ADDRESS_RE = re.compile(
+    r"""^
+    [A-Za-z_][A-Za-z0-9_]*       # provider type (e.g. openstack_compute_instance_v2)
+    \.[A-Za-z_][A-Za-z0-9_-]*    # resource name (e.g. team_ide)
+    (?:
+        \[(?:\d+|"[^"\\]+")\]    # optional index ([0] or ["Team-A"])
+    )?
+    $""",
+    re.VERBOSE,
+)
+
+
+def _latest_tf_state_for(deployment_id: UUID, db: Session) -> str | None:
+    """Return the JSON blob of the most recent task that captured a
+    Terraform state for this deployment, or None when no apply ever
+    succeeded yet.
+
+    Note: we deliberately do NOT filter by ``task.type`` — the worker
+    captures state on deploy / destroy / pause / resume / redeploy
+    alike, and any of those produce a valid snapshot. The "most
+    recent" task wins, mirroring the existing ``get_deployment_outputs``
+    semantics in ``crud/deployments.py``.
+    """
+    task = (
+        db.query(TaskModel)
+        .filter(TaskModel.deploymentId == deployment_id)
+        .filter(TaskModel.tf_state.isnot(None))
+        .order_by(desc(TaskModel.created_at))
+        .first()
+    )
+    return task.tf_state if task else None
+
+
+@router.get(
+    "/{deployment_id}/resources",
+    response_model=DeploymentResourceListResponse,
+)
+def list_deployment_resources(
+    deployment_id: UUID,
+    refresh: bool = True,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user_keycloak),
+):
+    """Stage-1 resource listing for the Infrastructure tab.
+
+    Owner-only. ``refresh=false`` skips the live OpenStack join — use
+    that when polling rapidly to avoid hammering Keystone, or when
+    OpenStack is known unavailable and the cached state is good enough.
+    """
+    deployment = crud_deployments.get_deployment(db, deployment_id)
+    if not deployment:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Deployment not found",
+        )
+    ensure_deployment_owner_view(deployment, current_user)
+
+    state_json = _latest_tf_state_for(deployment_id, db)
+    views = build_resource_views(
+        db=db,
+        user=current_user,
+        tf_state_json=state_json,
+        refresh=refresh,
+    )
+    # Convert dataclasses → Pydantic models via dict-roundtrip. The
+    # fields line up 1:1 by name, so ``model_validate`` works directly
+    # on the dataclass dict.
+    payload = [
+        DeploymentResourceSchema.model_validate(_view_asdict(v))
+        for v in views
+    ]
+    return DeploymentResourceListResponse(resources=payload, live=refresh)
+
+
+@router.get(
+    "/{deployment_id}/resources/{address:path}",
+    response_model=DeploymentResourceSchema,
+)
+def get_deployment_resource_detail(
+    deployment_id: UUID,
+    address: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user_keycloak),
+):
+    """Stage-2 detail for one compute instance.
+
+    Uses a ``path``-converter on the address so the for_each-key
+    quoting (``team_ide["Team-A"]``) survives URL routing without
+    aggressive encoding gymnastics on the client side. The address
+    MUST exist in the cached state and MUST be a compute instance;
+    other categories get 422.
+    """
+    deployment = crud_deployments.get_deployment(db, deployment_id)
+    if not deployment:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Deployment not found",
+        )
+    ensure_deployment_owner_view(deployment, current_user)
+
+    if not _TF_ADDRESS_RE.match(address):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={"reason": "invalid_resource_address"},
+        )
+
+    state_json = _latest_tf_state_for(deployment_id, db)
+    view = build_resource_detail(
+        db=db,
+        user=current_user,
+        tf_state_json=state_json,
+        address=address,
+    )
+    if view is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"reason": "resource_not_in_state", "address": address},
+        )
+    return DeploymentResourceSchema.model_validate(_view_asdict(view))
+
+
+@router.post(
+    "/{deployment_id}/resources/{address:path}/redeploy",
+    status_code=status.HTTP_202_ACCEPTED,
+)
+def redeploy_deployment_resource(
+    deployment_id: UUID,
+    address: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user_keycloak),
+):
+    """Replace one compute instance via ``terraform apply -replace=…``.
+
+    Address-whitelisted: we re-parse the cached TF state and only
+    accept addresses that resolve to a compute instance. Anything else
+    fails with 422 — the redeploy of a network resource would tear
+    down all the team VMs, which is not what a one-VM "fix it" action
+    should do.
+
+    Concurrency: same per-user advisory lock as create/destroy/pause
+    so a parallel redeploy can't race a destroy. The lock is held
+    only for the row insert; Celery dispatch happens after commit.
+    """
+    crud_locks.acquire_user_xact_lock(db, current_user.userId)
+
+    deployment = crud_deployments.get_deployment(db, deployment_id)
+    if not deployment:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Deployment not found",
+        )
+    ensure_deployment_owner_view(deployment, current_user)
+
+    if not _TF_ADDRESS_RE.match(address):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={"reason": "invalid_resource_address"},
+        )
+
+    # Whitelist check: the address MUST point to a compute instance in
+    # the current state. We re-parse here instead of trusting the
+    # output of the list endpoint — a hand-crafted POST would skip
+    # the list call entirely.
+    from app.services.tf_state_parser import parse_tf_state
+    state_json = _latest_tf_state_for(deployment_id, db)
+    parsed = parse_tf_state(state_json)
+    match = next((r for r in parsed if r.address == address), None)
+    if match is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"reason": "resource_not_in_state", "address": address},
+        )
+    if match.category != "instance":
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={
+                "reason": "non_redeployable_resource_type",
+                "address": address,
+                "category": match.category,
+            },
+        )
+
+    return _dispatch_lifecycle_task(
+        db=db,
+        deployment=deployment,
+        current_user=current_user,
+        task_type=TaskType.REDEPLOY,
+        celery_task_name="tasks.redeploy_resource",
+        response_status="redeploying",
+        extra_args=[address],
+    )
+
+
+def _view_asdict(view) -> dict:
+    """Recursive dataclass → dict converter, used to bridge
+    ``deployment_status.DeploymentResourceView`` to Pydantic.
+
+    ``dataclasses.asdict`` already recurses into nested dataclasses,
+    so we just delegate. Kept as a thin wrapper so the call sites
+    above read symmetrically and we can swap in custom handling later
+    if needed (e.g. enum serialisation).
+    """
+    from dataclasses import asdict
+    return asdict(view)
+
+
+
 #
 # Halts the OpenStack compute instances of a deployment without
 # tearing them down. The worker task pulls the terraform state, lists

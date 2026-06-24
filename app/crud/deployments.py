@@ -20,10 +20,25 @@ def _is_destroyed_subq():
 
 
 def count_active_user_deployments(db: Session, user_id: UUID) -> int:
-    """Number of non-destroyed deployments owned by user."""
+    """Number of *active* deployments owned by ``user_id``.
+
+    "Active" here matches what the user actually sees on the Deployments
+    page:
+
+      * Owned by them (``Deployment.userId == user_id``).
+      * Not soft-deleted (``deleted_at IS NULL``) — once the user has
+        clicked "Löschen" we must not keep the credentials locked
+        against a row that is no longer visible to them.
+      * Has not been fully destroyed (no successful DESTROY task) —
+        soft-delete happens AFTER destroy completes, so during the
+        destroy-in-flight phase ``deleted_at`` may still be NULL but
+        the deployment is on its way out. Keeping the destroyed-check
+        is harmless and matches the historical contract.
+    """
     return (
         db.query(Deployment)
         .filter(Deployment.userId == user_id)
+        .filter(Deployment.deleted_at.is_(None))
         .filter(~_is_destroyed_subq())
         .count()
     )
@@ -33,6 +48,7 @@ def has_active_user_deployment(db: Session, user_id: UUID) -> bool:
     return (
         db.query(Deployment.deploymentId)
         .filter(Deployment.userId == user_id)
+        .filter(Deployment.deleted_at.is_(None))
         .filter(~_is_destroyed_subq())
         .first() is not None
     )

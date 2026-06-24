@@ -7,7 +7,7 @@ from app.crud import app_version_approvals as crud_approvals
 from app.crud import apps as crud_apps
 from app.database import get_db
 from app.models import User
-from app.routers.apps import _serialize_app
+from app.routers.apps import _serialize_app, load_variable_definitions
 from app.schemas import (
     AppResponse,
     AppVersionApprovalDecision,
@@ -49,8 +49,38 @@ def approve_version(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_admin),
 ):
-    """Approve a PENDING version — makes it deployable by all users."""
-    _require_app(db, app_id)
+    """Approve a PENDING version — makes it deployable by all users.
+
+    Bevor wir den Status flippen, validieren wir die ``@openstack``-
+    Marker in den Terraform-/Packer-Variablen-Dateien dieser Version.
+    Eine Version mit kaputten Markern soll gar nicht erst approved
+    werden — sonst landen Bugs im Storefront, die der Author beim
+    Submit noch hätte beheben können. Wir nutzen dieselbe Hilfsfunktion
+    wie ``GET /apps/{id}/variables``, damit die Logik genau identisch
+    bleibt (single source of truth — kein Re-Parsing).
+    """
+    app = _require_app(db, app_id)
+
+    # Marker-Validierung: ``load_variable_definitions`` parst die
+    # Variablen-Dateien und hängt fehlerhafte Marker als
+    # ``markerError`` an die einzelne Variable. Wir blockieren das
+    # Approval, wenn mindestens eine Variable einen Marker-Bug trägt.
+    variables = load_variable_definitions(app, version_tag)
+    marker_errors = [
+        v.get("markerError") for v in variables if v.get("markerError")
+    ]
+    if marker_errors:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={
+                "message": (
+                    "Version kann nicht approved werden — fehlerhafte "
+                    "@openstack-Marker in den Variablen-Dateien"
+                ),
+                "marker_errors": marker_errors,
+            },
+        )
+
     return crud_approvals.approve(db, app_id, version_tag, current_user.userId)
 
 

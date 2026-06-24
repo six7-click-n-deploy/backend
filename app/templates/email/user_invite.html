@@ -31,14 +31,34 @@
     <td>Username</td>
     <td><code>{{ access.username }}</code></td>
   </tr>
+  {#
+    Auth rendering switches on ``access.auth_type``. Apps without a
+    password ship ``type = "ssh_key" | "oauth" | "none"`` and the
+    notifier passes the raw value through as ``auth_value``. ``none``
+    skips the credential row entirely so the mail just shows URL/IP.
+  #}
+  {% if access.auth_type == "password" and access.password %}
   <tr>
     <td>Password</td>
     <td><code>{{ access.password }}</code></td>
   </tr>
-  {% if access.auth_type and access.auth_type != "password" %}
+  {% elif access.auth_type == "ssh_key" and access.auth_value %}
   <tr>
-    <td>Auth type</td>
-    <td>{{ access.auth_type }}</td>
+    <td>SSH key</td>
+    <td><code>{{ access.auth_value }}</code></td>
+  </tr>
+  {% elif access.auth_type == "oauth" and access.auth_value %}
+  <tr>
+    <td>Login</td>
+    <td>
+      <a href="{{ access.auth_value }}">{{ access.auth_value }}</a>
+      <br><span class="muted">Sign in with your external account — no password is stored.</span>
+    </td>
+  </tr>
+  {% elif access.auth_type == "none" %}
+  <tr>
+    <td>Auth</td>
+    <td><span class="muted">No login required — open access.</span></td>
   </tr>
   {% endif %}
 </table>
