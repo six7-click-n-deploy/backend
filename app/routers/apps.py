@@ -352,19 +352,26 @@ def _parse_marker(
             f"{sorted(_VAR_SCOPES)}",
         )
 
-    # Nur-var_scope-Marker (``@openstack:::team``): kein Type, kein
-    # Mode, kein Multi — der Marker hat ausschließlich Scope-Bedeutung.
-    # Wir verlangen, dass der vierte Slot belegt ist, sonst ist es ein
-    # leerer Marker und damit ein Author-Fehler.
+    # Nur-var_scope-Marker (``@openstack:::team`` oder Varianten mit
+    # weniger Doppelpunkten): kein Type, kein Mode, kein Multi — der
+    # Marker hat ausschließlich Scope-Bedeutung. Wenn der App-Autor
+    # eine kurze Form schreibt (``@openstack::team`` mit zwei statt
+    # vier Slots), landet ``team`` regex-bedingt im Mode-Slot statt im
+    # vierten Slot. Wir picken den ersten nicht-leeren Slot von
+    # mode/multi/scope und akzeptieren ihn, solange das ein
+    # var_scope-Token ist — das macht die Marker-Schreibweise
+    # robuster gegen die Anzahl der Doppelpunkte. Mehrere belegte
+    # Slots gleichzeitig sind weiterhin Fehler (mehrdeutig).
     if os_type is None:
-        if (raw_mode not in (None, "")) or (raw_multi not in (None, "")):
+        candidates = [s for s in (raw_mode, raw_multi, raw_scope) if s not in (None, "")]
+        if len(candidates) > 1:
             raise MarkerError(
                 var_name,
                 "leerer type-slot ist nur in Kombination mit ``var_scope`` "
-                "erlaubt (z.B. ``@openstack:::team``); mode/multi sind hier "
-                "nicht zulässig",
+                "erlaubt (z.B. ``@openstack:::team``); mehrere belegte "
+                "Slots sind hier nicht zulässig",
             )
-        var_scope = _parse_var_scope(raw_scope)
+        var_scope = _parse_var_scope(candidates[0] if candidates else None)
         if var_scope is None:
             raise MarkerError(
                 var_name,
@@ -418,34 +425,39 @@ def _parse_marker(
         # Slot ist Fehler — File-Variablen brauchen eine explizite
         # Erlaubnisliste, damit der Wizard im ``accept``-Attribut filtern
         # kann und der Backend-Upload einen klaren Validierungspfad hat.
-        if raw_multi in (None, ""):
+        #
+        # Regex-Detail: bei Werten mit ``|`` (z.B. ``pdf|docx``) landet
+        # der Inhalt im vierten Slot statt im dritten, weil der dritte
+        # Slot keine Pipe akzeptiert. Wir akzeptieren das transparent
+        # — beide Positionen werden auf den Extensions-Inhalt geprüft.
+        exts_slot: str | None = None
+        if raw_multi not in (None, ""):
+            exts_slot = raw_multi
+            if raw_scope not in (None, ""):
+                raise MarkerError(
+                    var_name,
+                    f"@openstack:file akzeptiert keinen fünften Slot "
+                    f"(angegeben: '{raw_scope}') — der Scope steht im "
+                    f"dritten Slot (z.B. ``@openstack:file:user:pdf``)",
+                )
+        elif raw_scope not in (None, ""):
+            exts_slot = raw_scope
+        if exts_slot is None:
             raise MarkerError(
                 var_name,
                 "``@openstack:file`` braucht einen Endungsfilter im "
                 "vierten Slot, z.B. ``@openstack:file:all:pdf`` oder "
                 "``@openstack:file:user:pdf|docx``",
             )
-        exts_raw = raw_multi.lower()
+        exts_raw = exts_slot.lower()
         if not _FILE_EXTENSIONS_RE.match(exts_raw):
             raise MarkerError(
                 var_name,
-                f"ungültiger Endungsfilter '{raw_multi}' — erlaubt sind "
+                f"ungültiger Endungsfilter '{exts_slot}' — erlaubt sind "
                 f"alphanumerische Endungen, mehrere getrennt mit '|' "
                 f"(z.B. ``pdf|docx``)",
             )
         file_exts = exts_raw.split("|")
-
-        # Vierter Slot ist bei File-Variablen reserviert — ein expliziter
-        # Wert dort wäre kollidierend mit dem Extensions-Slot. Lehnen wir
-        # ab, damit Autoren wissen, dass es bei File-Markern keinen
-        # separaten ``var_scope``-Slot gibt (der Scope steht im Mode-Slot).
-        if raw_scope not in (None, ""):
-            raise MarkerError(
-                var_name,
-                f"@openstack:file akzeptiert keinen fünften Slot "
-                f"(angegeben: '{raw_scope}') — der Scope steht im "
-                f"dritten Slot (z.B. ``@openstack:file:user:pdf``)",
-            )
 
         return (os_type, None, None, file_scope, file_scope, file_exts)
 
