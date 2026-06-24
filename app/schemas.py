@@ -4,7 +4,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, model_validator
 
-from app.models import OpenStackAuthType, TaskStatus, TaskType, UserRole
+from app.models import AppVersionApprovalStatus, OpenStackAuthType, TaskStatus, TaskType, UserRole
 
 
 # ----------------------------------------------------------------
@@ -100,17 +100,17 @@ class AppBase(BaseModel):
     name: str
     description: str | None = None
     git_link: str | None = None
+    is_private: bool = False
 
 
 class AppCreate(AppBase):
     # Image is sent as a full data-URL string, e.g.
     # ``"data:image/png;base64,iVBORw0KG..."``. The router decodes the
     # base64 part to bytes and stores mime + bytes in two columns.
-    # Plain bytes would also work but data-URLs survive a round-trip
-    # through JSON cleanly (no Content-Type / multipart headache) and
-    # the same string can be set verbatim into ``<img :src=...>`` on
-    # the read path.
     image: str | None = None
+    # When True and is_private=False, all existing Git tags are
+    # automatically submitted for review right after creation.
+    submit_all_versions: bool = False
 
 
 class AppUpdate(BaseModel):
@@ -123,16 +123,22 @@ class AppUpdate(BaseModel):
     # from its setattr loop as a defense-in-depth.
     name: str | None = None
     description: str | None = None
+    # git_link is immutable after creation — omitted here intentionally.
+    # The router returns HTTP 400 if a caller includes it in the body.
+    is_private: bool | None = None
     # Same data-URL convention as ``AppCreate``. Pass ``""`` (empty
     # string) to explicitly clear the image; ``None`` (the default)
     # leaves it unchanged.
     image: str | None = None
+
+    model_config = ConfigDict(extra="forbid")
 
 
 class AppResponse(AppBase):
     appId: UUID
     userId: UUID
     created_at: datetime
+    is_private: bool
     # Data-URL or null. Populated from ``app.image`` + ``app.image_mime``
     # by ``serialize_app_image``; the raw bytes never leave the backend.
     image: str | None = None
@@ -148,6 +154,37 @@ class AppWithUser(AppResponse):
 
 class AppWithVersions(AppWithUser):
     versions: list[dict[str, str]] = []
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+# ----------------------------------------------------------------
+# APP VERSION APPROVAL SCHEMAS
+# ----------------------------------------------------------------
+class AppVersionApprovalSubmit(BaseModel):
+    diff_url: str | None = None
+
+
+class AppVersionApprovalDecision(BaseModel):
+    rejection_reason: str
+
+
+class AppVersionApprovalResponse(BaseModel):
+    approvalId: UUID
+    appId: UUID
+    version_tag: str
+    status: AppVersionApprovalStatus
+    diff_url: str | None = None
+    rejection_reason: str | None = None
+    reviewed_by: UUID | None = None
+    reviewed_at: datetime | None = None
+    created_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class AppVersionApprovalWithApp(AppVersionApprovalResponse):
+    app: AppResponse
 
     model_config = ConfigDict(from_attributes=True)
 
