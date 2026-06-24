@@ -1,0 +1,13 @@
+# Trivy ignore file
+#
+# Format: one CVE / misconfig ID per line. Anything after `#` is a
+# comment. Document *why* a finding is suppressed so reviewers can
+# revisit when the upstream advisory changes.
+
+# AVD-DS-0002: Dockerfile.dev runs as root.
+# Production `Dockerfile` already runs as `appuser` (non-root). The
+# dev image is only used by docker compose for local development with
+# bind-mounted source — switching to non-root requires matching the
+# container UID to the host UID (build args, compose changes, macOS
+# vs Linux verification). Tracked in #59.
+AVD-DS-0002

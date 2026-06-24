@@ -95,14 +95,20 @@ def get_first_task(db: Session, deployment_id: UUID) -> Task | None:
     )
 
 
-def get_deployment_status(db: Session, deployment_id: UUID) -> str | None:
-    """Effective deployment status, derived from the latest task.
+def derive_status(
+    task_status: TaskStatus | None,
+    task_type: TaskType | None,
+) -> str | None:
+    """Synthesize the effective deployment status from the latest task's
+    ``(status, type)`` pair.
 
     The bare ``task.status`` (pending/running/success/failed/cancelled) is
     not enough by itself: a destroy task in flight should surface as
     ``destroying`` and a finished destroy as ``destroyed``, neither of
-    which exists as a stored enum value. We synthesize them on the fly
-    from ``(task.type, task.status)``.
+    which exists as a stored enum value. We synthesize them here so the
+    same mapping is used by the single-deployment path
+    (``get_deployment_status``) and the bulk list path
+    (``bulk_get_task_summary``).
 
     Pause/resume follow the same pattern:
 
@@ -121,12 +127,11 @@ def get_deployment_status(db: Session, deployment_id: UUID) -> str | None:
 
     Returns ``None`` if the deployment has no tasks yet.
     """
-    task = get_latest_task(db, deployment_id)
-    if task is None or task.status is None:
+    if task_status is None:
         return None
 
-    raw_status = task.status.value
-    raw_type = task.type.value if task.type else None
+    raw_status = task_status.value
+    raw_type = task_type.value if task_type else None
 
     if raw_type == "destroy":
         if raw_status in ("pending", "running"):
@@ -165,10 +170,98 @@ def get_deployment_status(db: Session, deployment_id: UUID) -> str | None:
     return raw_status
 
 
+def get_deployment_status(db: Session, deployment_id: UUID) -> str | None:
+    """Effective deployment status for a single deployment.
+
+    Thin wrapper around ``derive_status`` for the per-deployment path
+    (detail endpoint, single-row callers). The list endpoint goes
+    through ``bulk_get_task_summary`` instead so it doesn't fan out
+    one query per row.
+
+    Returns ``None`` if the deployment has no tasks yet.
+    """
+    task = get_latest_task(db, deployment_id)
+    if task is None:
+        return None
+    return derive_status(task.status, task.type)
+
+
 def get_deployment_created_at(db: Session, deployment_id: UUID):
     """Get deployment creation time from first task"""
     task = get_first_task(db, deployment_id)
     return task.created_at if task else None
+
+
+def bulk_get_task_summary(
+    db: Session, deployment_ids: list[UUID]
+) -> dict[UUID, tuple[TaskStatus | None, TaskType | None, datetime | None]]:
+    """Fetch the latest-task ``(status, type)`` and the first-task
+    ``created_at`` for every deployment in ``deployment_ids`` — in two
+    queries, regardless of how many deployments are passed.
+
+    Replaces the per-row ``get_latest_task`` + ``get_first_task`` fan-out
+    that the list endpoint used to do (1 + 2N queries → 3 queries for the
+    same payload). Mirrors the window-function pattern used by
+    ``routers/dashboard.py:get_dashboard_stats``.
+
+    Returns a dict keyed by ``deploymentId``. Deployments with no tasks
+    are simply absent from the map; the caller must handle that with
+    ``.get(deployment_id, (None, None, None))``.
+    """
+    from sqlalchemy import asc, func
+
+    if not deployment_ids:
+        return {}
+
+    # Latest task per deployment via row_number() over (PARTITION BY ...
+    # ORDER BY created_at DESC).
+    latest_rn = (
+        func.row_number()
+        .over(partition_by=Task.deploymentId, order_by=desc(Task.created_at))
+        .label("rn")
+    )
+    latest_subq = (
+        db.query(
+            Task.deploymentId.label("did"),
+            Task.status.label("status"),
+            Task.type.label("type"),
+            latest_rn,
+        )
+        .filter(Task.deploymentId.in_(deployment_ids))
+        .subquery()
+    )
+    latest_rows = (
+        db.query(latest_subq.c.did, latest_subq.c.status, latest_subq.c.type)
+        .filter(latest_subq.c.rn == 1)
+        .all()
+    )
+
+    # First task per deployment (ascending) for created_at.
+    first_rn = (
+        func.row_number()
+        .over(partition_by=Task.deploymentId, order_by=asc(Task.created_at))
+        .label("rn")
+    )
+    first_subq = (
+        db.query(
+            Task.deploymentId.label("did"),
+            Task.created_at.label("created_at"),
+            first_rn,
+        )
+        .filter(Task.deploymentId.in_(deployment_ids))
+        .subquery()
+    )
+    first_rows = (
+        db.query(first_subq.c.did, first_subq.c.created_at)
+        .filter(first_subq.c.rn == 1)
+        .all()
+    )
+
+    first_map = {row.did: row.created_at for row in first_rows}
+    return {
+        row.did: (row.status, row.type, first_map.get(row.did))
+        for row in latest_rows
+    }
 
 
 def get_team_members(db: Session, team_id: UUID) -> list[User]:
@@ -281,21 +374,75 @@ def get_deployments(
     if app_id:
         query = query.filter(Deployment.appId == app_id)
 
+    # Filter by effective status. The status the API exposes is derived
+    # from the LATEST task per deployment (see ``derive_status``), so we
+    # join against a window-function subquery that pins the latest task
+    # per deployment and apply the equivalent SQL predicate. Doing this
+    # here — BEFORE offset/limit — keeps the page size correct: the old
+    # post-filter loop only ever inspected the first ``limit`` rows, so
+    # filtering by ``running`` could return fewer than ``limit`` matches
+    # even when the DB had more.
+    if status:
+        from sqlalchemy import and_, func
+
+        latest_rn = (
+            func.row_number()
+            .over(partition_by=Task.deploymentId, order_by=desc(Task.created_at))
+            .label("rn")
+        )
+        latest_subq = (
+            db.query(
+                Task.deploymentId.label("did"),
+                Task.status.label("status"),
+                Task.type.label("type"),
+                latest_rn,
+            ).subquery()
+        )
+        query = query.join(
+            latest_subq,
+            and_(
+                latest_subq.c.did == Deployment.deploymentId,
+                latest_subq.c.rn == 1,
+            ),
+        )
+
+        if status == "destroying":
+            query = query.filter(
+                latest_subq.c.type == TaskType.DESTROY,
+                latest_subq.c.status.in_((TaskStatus.PENDING, TaskStatus.RUNNING)),
+            )
+        elif status == "destroyed":
+            query = query.filter(
+                latest_subq.c.type == TaskType.DESTROY,
+                latest_subq.c.status == TaskStatus.SUCCESS,
+            )
+        else:
+            # Plain task statuses. Mirror the ``derive_status`` mapping:
+            # - ``pending``/``running``/``success`` only match deploy-
+            #   typed tasks (destroy + same status surfaces as
+            #   ``destroying``/``destroyed``, not the raw value).
+            # - ``failed``/``cancelled`` bleed through both task types,
+            #   matching the comment in ``derive_status`` that a broken
+            #   destroy must surface as ``failed``/``cancelled`` so the
+            #   user sees the destroy itself broke.
+            try:
+                status_enum = TaskStatus(status)
+            except ValueError:
+                # Unknown status string → empty result, like the old
+                # post-filter loop would have produced.
+                return []
+            query = query.filter(latest_subq.c.status == status_enum)
+            if status_enum in (
+                TaskStatus.PENDING,
+                TaskStatus.RUNNING,
+                TaskStatus.SUCCESS,
+            ):
+                query = query.filter(latest_subq.c.type != TaskType.DESTROY)
+
     # Order by deploymentId (UUID) - could also join with Task for created_at ordering
     query = query.order_by(desc(Deployment.deploymentId))
 
-    deployments = query.offset(skip).limit(limit).all()
-
-    # Filter by status if specified (requires checking latest task)
-    if status:
-        filtered = []
-        for deployment in deployments:
-            latest_task = get_latest_task(db, deployment.deploymentId)
-            if latest_task and latest_task.status and latest_task.status.value == status:
-                filtered.append(deployment)
-        return filtered
-
-    return deployments
+    return query.offset(skip).limit(limit).all()
 
 
 def get_deployments_with_status(db: Session, deployments: list[Deployment]) -> list[dict[str, Any]]:
