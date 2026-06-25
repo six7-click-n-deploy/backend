@@ -20,9 +20,21 @@ logger = logging.getLogger(__name__)
 class GitService:
     """Service for Git operations and release management."""
 
+    # Sparse-Checkout-Allowlist für den Variablen-Scan.
+    #
+    # Non-Cone-Mode (siehe ``clone_release_vars``): die Einträge sind
+    # ``.gitignore``-Pathspecs. ``packer/`` matcht den gesamten Subtree —
+    # damit holen wir sowohl die Legacy-Layout-Datei
+    # (``packer/variables.pkr.hcl``) als auch das neue Per-Template-
+    # Layout (``packer/<key>/variables.pkr.hcl``) plus die
+    # ``template.pkr.hcl``-Dateien, die ``_discover_packer_templates``
+    # zur Image-Erkennung braucht. ``terraform/variables.tf`` bleibt
+    # eine Punkt-Spezifikation, weil wir aus Terraform nur die
+    # Variablen-Datei brauchen, nicht den Rest (main.tf, outputs.tf,
+    # cloud-init-Templates …).
     SPARSE_CHECKOUT_FILES = [
         'terraform/variables.tf',
-        'packer/variables.pkr.hcl',
+        'packer/',
     ]
 
     def __init__(self) -> None:
