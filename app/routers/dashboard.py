@@ -47,15 +47,17 @@ def get_dashboard_stats(
       * Student:       deployments they own OR are a team member of OR
                        have a direct ``UserToDeployment`` mapping for.
 
-    Apps counter MUST mirror the visibility rules of ``GET /apps``
-    (i.e. ``crud_apps.get_apps``):
+    Apps counter MUST mirror the role-branched visibility of
+    ``GET /apps`` (see ``routers/apps.py``):
 
-      * Always: apps owned by the requesting user (regardless of
-        ``is_private``, even if no version is approved yet).
-      * Additionally: public apps (``is_private = False``) that have
-        at least one APPROVED version. Public-but-unapproved apps are
-        invisible to everyone except the owner and admins, so they
-        must NOT inflate the counter.
+      * Teacher/Admin: every non-deleted app — exactly what
+        ``crud_apps.get_apps`` returns when called without
+        ``user_id``. Staff sees the whole catalog including public-
+        unapproved and private third-party apps; the KPI must too.
+      * Student/regular: own apps (regardless of ``is_private`` /
+        approval state) OR public apps (``is_private = False``)
+        with at least one APPROVED version — mirrors
+        ``crud_apps.get_visible_apps``.
 
     Soft-deleted rows (``deleted_at IS NOT NULL``) are excluded on both
     counters — same as the list endpoints.
@@ -91,27 +93,35 @@ def get_dashboard_stats(
 
     deployments_total = deployments_q.scalar() or 0
 
-    # Apps visible to the user — same rule as ``crud_apps.get_apps``.
-    # The subquery returns every appId that has at least one APPROVED
-    # version, used as the gate for the public branch of the OR.
-    approved_app_ids = (
-        db.query(AppVersionApproval.appId)
-        .filter(AppVersionApproval.status == AppVersionApprovalStatus.APPROVED)
-        .distinct()
-        .scalar_subquery()
-    )
-    apps_total = (
-        db.query(func.count(App.appId))
-        .filter(App.deleted_at.is_(None))
-        .filter(
-            or_(
-                App.userId == current_user.userId,
-                (App.is_private == False)  # noqa: E712
-                & App.appId.in_(approved_app_ids),
-            )
+    # Apps visible to the user — role-branched, same gate as the
+    # ``/apps`` endpoint at ``routers/apps.py``. Teacher/Admin see
+    # everything non-deleted (mirrors ``crud_apps.get_apps``); students
+    # see own + public-approved (mirrors ``crud_apps.get_visible_apps``).
+    if current_user.role in (UserRole.TEACHER, UserRole.ADMIN):
+        apps_total = (
+            db.query(func.count(App.appId))
+            .filter(App.deleted_at.is_(None))
+            .scalar()
+        ) or 0
+    else:
+        approved_app_ids = (
+            db.query(AppVersionApproval.appId)
+            .filter(AppVersionApproval.status == AppVersionApprovalStatus.APPROVED)
+            .distinct()
+            .scalar_subquery()
         )
-        .scalar()
-    ) or 0
+        apps_total = (
+            db.query(func.count(App.appId))
+            .filter(App.deleted_at.is_(None))
+            .filter(
+                or_(
+                    App.userId == current_user.userId,
+                    (App.is_private == False)  # noqa: E712
+                    & App.appId.in_(approved_app_ids),
+                )
+            )
+            .scalar()
+        ) or 0
 
     courses_total = db.query(func.count(Course.courseId)).scalar() or 0
 
