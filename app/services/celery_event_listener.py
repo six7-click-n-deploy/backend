@@ -126,15 +126,23 @@ def format_logs(logs_data) -> str:
 
 
 def _get_icon(level: str) -> str:
-    """Get icon for log level"""
+    """Get the leading marker for a log level.
+
+    Returns a short ASCII tag rather than an emoji — the frontend
+    renders the log stream verbatim, and the project's UI guideline
+    is to keep emojis out of all user-visible surfaces (the frontend
+    has its own coloured pill / icon per level in the renderer).
+    The tag length is fixed at four characters so messages line up
+    cleanly in the plain-text log view.
+    """
     icons = {
-        "DEBUG": "🔍",
-        "INFO": "ℹ️",
-        "SUCCESS": "✓",
-        "WARNING": "⚠️",
-        "ERROR": "❌",
+        "DEBUG": "[dbg]",
+        "INFO":  "[inf]",
+        "SUCCESS": " [ok]",
+        "WARNING": "[warn]",
+        "ERROR": "[err]",
     }
-    return icons.get(level, "•")
+    return icons.get(level, "    -")
 
 
 # Mapping from common Celery infrastructure exception class names to
@@ -423,7 +431,7 @@ def start_event_listener():
                         # error
                         if 'error' in failure_data:
                             current_logs = update_data.get('logs', '') or ''
-                            update_data['logs'] = current_logs + f"\n\n❌ Error: {failure_data['error']}"
+                            update_data['logs'] = current_logs + f"\n\n[err] Error: {failure_data['error']}"
                         # tf_state
                         if 'tf_state' in failure_data:
                             update_data['tf_state'] = failure_data['tf_state']
@@ -431,7 +439,7 @@ def start_event_listener():
                         if 'commit_info' in failure_data and failure_data['commit_info']:
                             commit = failure_data['commit_info']
                             if isinstance(commit, dict):
-                                commit_str = f"\n📝 Commit: {commit.get('hash', 'N/A')[:8]}"
+                                commit_str = f"\nCommit: {commit.get('hash', 'N/A')[:8]}"
                                 commit_str += f"\n   Message: {commit.get('message', 'N/A')}"
                                 commit_str += f"\n   Author: {commit.get('author', 'N/A')}"
                                 current_logs = update_data.get('logs', '') or ''
@@ -577,7 +585,7 @@ def start_event_listener():
             }
         )
 
-        logger.info("✓ Celery event listener ready, waiting for events...")
+        logger.info("Celery event listener ready, waiting for events...")
         recv.capture(limit=None, timeout=None, wakeup=True)
 
 

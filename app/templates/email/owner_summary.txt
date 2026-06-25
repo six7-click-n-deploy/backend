@@ -25,7 +25,15 @@ TEAM — {{ team.name }}
 Members:
 {% for member in team.members %}  - {{ member.display_name }} <{{ member.user.email }}>
       login:    {{ member.access.username }}
+{%- if member.access.auth_type == "password" and member.access.password %}
       password: {{ member.access.password }}
+{%- elif member.access.auth_type == "ssh_key" and member.access.auth_value %}
+      ssh key:  {{ member.access.auth_value }}
+{%- elif member.access.auth_type == "oauth" and member.access.auth_value %}
+      login at: {{ member.access.auth_value }}
+{%- elif member.access.auth_type == "none" %}
+      auth:     (open access, no credential)
+{%- endif %}
 {% endfor %}
 {% endfor %}
 Deployed from {{ deployment.git_url }} at tag {{ deployment.release_tag }}.

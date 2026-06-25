@@ -83,14 +83,30 @@ def _display_name(user: User) -> str:
 #   user_accounts.value:
 #     {
 #       "Team-1-luca": {
-#         "auth":     "<password>",
+#         "auth":     "<password-or-key-or-login-url>",
 #         "ip":       "1.2.3.4",
 #         "port":     8080,
-#         "type":     "password",
+#         "type":     "password" | "ssh_key" | "oauth" | "none",
 #         "username": "luca"
 #       },
 #       ...
 #     }
+#
+#   Auth-type contract:
+#     * ``password`` (default if omitted) — ``auth`` is the password
+#       string. The mail prints a "Password" line.
+#     * ``ssh_key``  — ``auth`` is the public key the user should use
+#       (or a one-line hint about which key was pre-provisioned). The
+#       mail prints an "SSH key" line in a monospace block.
+#     * ``oauth``    — ``auth`` is the login URL the user should click
+#       (e.g. an external IdP). The mail prints "Login via …" with
+#       the URL.
+#     * ``none``     — no credential is shipped (open dashboard, no
+#       auth wall). ``auth`` may be omitted; the mail leaves out the
+#       credentials block entirely and only ships URL/IP.
+#   An unknown ``type`` falls back to ``password`` rendering for
+#   safety (the mail still shows whatever ``auth`` value the app
+#   produced rather than silently dropping it).
 #
 #   teams_summary.value: {"Team-1": 1, ...}  — member counts; not used
 #                                              directly but useful as a
@@ -215,12 +231,29 @@ def _access_for_user(
         candidates_with_inner_username.discard("")
 
         if suffix in candidates_with_inner_username:
+            # Normalise the ``type`` slot once. Unknown values fall
+            # back to ``password`` rendering so unforeseen app outputs
+            # still produce a useful mail rather than dropping silently.
+            raw_type = raw.get("type")
+            auth_type = raw_type if raw_type in ("password", "ssh_key", "oauth", "none") else "password"
+            auth_value = raw.get("auth")
+            # ``password`` field is kept for backwards-compatibility
+            # with any template path that still reads it directly; it
+            # is only populated for the password type so a missing
+            # value renders as None (templates check ``auth_type``
+            # before pulling ``password``).
+            password = auth_value if auth_type == "password" else None
             return {
                 "username": raw.get("username") or suffix,
-                "password": raw.get("auth"),
+                "password": password,
                 "ip": raw.get("ip"),
                 "port": raw.get("port"),
-                "auth_type": raw.get("type") or "password",
+                "auth_type": auth_type,
+                # ``auth_value`` carries the raw credential regardless
+                # of type — templates use it together with
+                # ``auth_type`` to decide WHERE to show it (password
+                # field, SSH-key block, OAuth login link, ...).
+                "auth_value": auth_value,
                 # Convenience fallback so the user-mail can show a URL
                 # even when the per-user output doesn't carry one —
                 # use the team VM's URL instead.
@@ -385,7 +418,12 @@ def notify_deployment_succeeded(
                 member_payload.append({
                     "user": member,
                     "display_name": _display_name(member),
-                    "access": {"username": "—", "password": "—"},
+                    "access": {
+                        "username": "—",
+                        "password": "—",
+                        "auth_type": "password",
+                        "auth_value": None,
+                    },
                 })
                 continue
             member_payload.append({

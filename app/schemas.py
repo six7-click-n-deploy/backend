@@ -1,5 +1,5 @@
 from datetime import datetime
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, model_validator
@@ -306,6 +306,114 @@ class DeploymentDetail(DeploymentWithRelations):
     logs: str | None = None  # Optional: can be excluded for large logs
 
     model_config = ConfigDict(from_attributes=True)
+
+
+# ----------------------------------------------------------------
+# DEPLOYMENT RESOURCE / INFRASTRUCTURE SCHEMAS
+# ----------------------------------------------------------------
+# These mirror the dataclasses in ``app/services/deployment_status.py``
+# 1:1 so the conversion at the endpoint boundary is a plain
+# ``model_validate(asdict(view))``. Kept here (instead of generated
+# from dataclasses) because Pydantic plays nicer with FastAPI's
+# OpenAPI emitter and because the dataclasses live in a service
+# module that should not depend on Pydantic for unit-testability.
+
+
+class LifecycleStatesSchema(BaseModel):
+    """Server lifecycle quad + optional fault message.
+
+    Fields are pass-through from OpenStack's Nova response; values
+    are stable strings (e.g. ``"ACTIVE"`` / ``"BUILD"`` /
+    ``"ERROR"``). The frontend renders a pill from
+    ``status`` + ``task_state`` and shows ``fault_message`` as a
+    banner when ``status == "ERROR"``.
+    """
+    status: str | None = None
+    task_state: str | None = None
+    vm_state: str | None = None
+    power_state: str | None = None
+    fault_message: str | None = None
+
+
+class HardwareSpecSchema(BaseModel):
+    flavor_name: str | None = None
+    ram_mb: int | None = None
+    vcpus: int | None = None
+    disk_gb: int | None = None
+    image_id: str | None = None
+    image_name: str | None = None
+    availability_zone: str | None = None
+    launched_at: str | None = None
+
+
+class NetworkAddressSchema(BaseModel):
+    network: str
+    fixed_ip: str | None = None
+    floating_ip: str | None = None
+    mac: str | None = None
+
+
+class NetworkPortSchema(BaseModel):
+    port_id: str
+    network_id: str | None = None
+    status: str | None = None
+    mac: str | None = None
+    fixed_ip: str | None = None
+    security_group_ids: list[str] = []
+
+
+class SecurityGroupSummarySchema(BaseModel):
+    id: str
+    name: str
+    description: str | None = None
+    ingress_rules: int
+    egress_rules: int
+
+
+class VolumeAttachmentSchema(BaseModel):
+    volume_id: str
+    device: str | None = None
+    size_gb: int | None = None
+    bootable: bool | None = None
+    status: str | None = None
+    name: str | None = None
+
+
+class DeploymentResourceSchema(BaseModel):
+    """One row in the resource list (stage 1) or the response of the
+    detail endpoint (stage 2 — same shape, more fields populated).
+
+    Non-instance categories (network, subnet, etc.) only populate
+    ``address``, ``type``, ``category``, ``provider_id``,
+    ``display_name``; the instance-only fields stay ``None`` /
+    empty list.
+    """
+    address: str
+    type: str
+    category: str
+    team: str | None = None
+    provider_id: str
+    display_name: str
+    drift: Literal["in_sync", "stale", "missing"] = "in_sync"
+    # Stage 1 fields (instance-only)
+    lifecycle: LifecycleStatesSchema | None = None
+    hardware: HardwareSpecSchema | None = None
+    addresses: list[NetworkAddressSchema] = []
+    # Stage 2 fields (instance-only, only set on the detail endpoint)
+    ports: list[NetworkPortSchema] | None = None
+    security_groups: list[SecurityGroupSummarySchema] | None = None
+    volumes: list[VolumeAttachmentSchema] | None = None
+    metadata: dict[str, str] | None = None
+
+
+class DeploymentResourceListResponse(BaseModel):
+    """Wrap the list in an object so we can add cursor/refresh-stamp
+    metadata later without a breaking API change."""
+    resources: list[DeploymentResourceSchema]
+    # True when the response was fetched with live OpenStack join.
+    # False means the caller passed ``?refresh=false`` and the
+    # response reflects only cached TF state.
+    live: bool
 
 
 # ----------------------------------------------------------------

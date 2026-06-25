@@ -41,6 +41,11 @@ class TaskType(str, enum.Enum):
     DESTROY = "destroy"
     PAUSE = "pause"
     RESUME = "resume"
+    # Single-resource redeploy: ``terraform apply -replace=<addr> -target=<addr>``
+    # for ONE Compute-Instance, without touching the other team VMs of the
+    # same deployment. Backend-validates that the targeted address is a
+    # known compute-instance in the cached TF state.
+    REDEPLOY = "redeploy"
 
 
 class TaskStatus(str, enum.Enum):

@@ -1,10 +1,19 @@
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel
-from sqlalchemy import desc, func
+from sqlalchemy import func, or_
 from sqlalchemy.orm import Session
 
 from app.database import get_db
-from app.models import App, Course, Deployment, Task, TaskStatus, User
+from app.models import (
+    App,
+    Course,
+    Deployment,
+    Team,
+    User,
+    UserRole,
+    UserToDeployment,
+    UserToTeam,
+)
 from app.utils.keycloak_auth import get_current_user_keycloak
 
 router = APIRouter()
@@ -27,26 +36,48 @@ def get_dashboard_stats(
     Cheap DB-only aggregates — intentionally separated from the OpenStack
     quota call (`GET /quotas/overview`) so the dashboard renders fast even
     when the OpenStack API is slow or unavailable.
+
+    Deployments counter MUST mirror the visibility rules of
+    ``GET /deployments`` so the KPI matches what the user actually sees
+    on the Deployments page:
+
+      * Teacher/Admin: deployments they own.
+      * Student:       deployments they own OR are a team member of OR
+                       have a direct ``UserToDeployment`` mapping for.
+
+    Soft-deleted rows (``deleted_at IS NOT NULL``) are excluded — same
+    as the list endpoint, backed by ``ix_deployments_live``.
     """
-    latest_task_subq = (
-        db.query(
-            Task.deploymentId.label("deployment_id"),
-            Task.status.label("status"),
-            func.row_number()
-            .over(partition_by=Task.deploymentId, order_by=desc(Task.created_at))
-            .label("rn"),
-        )
-        .subquery()
+    deployments_q = (
+        db.query(func.count(Deployment.deploymentId))
+        .filter(Deployment.deleted_at.is_(None))
     )
 
-    deployments_running = (
-        db.query(func.count(Deployment.deploymentId))
-        .join(latest_task_subq, latest_task_subq.c.deployment_id == Deployment.deploymentId)
-        .filter(Deployment.userId == current_user.userId)
-        .filter(latest_task_subq.c.rn == 1)
-        .filter(latest_task_subq.c.status == TaskStatus.RUNNING)
-        .scalar()
-    ) or 0
+    if current_user.role in (UserRole.TEACHER, UserRole.ADMIN):
+        deployments_q = deployments_q.filter(
+            Deployment.userId == current_user.userId
+        )
+    else:
+        # Owner OR team member OR direct mapping. Mirrors
+        # ``crud_deployments.get_deployments(member_user_id=...)``.
+        member_team_ids = db.query(UserToTeam.teamId).filter(
+            UserToTeam.userId == current_user.userId
+        )
+        member_deployment_ids_via_teams = db.query(Team.deploymentId).filter(
+            Team.teamId.in_(member_team_ids)
+        )
+        member_deployment_ids_direct = db.query(
+            UserToDeployment.deploymentId
+        ).filter(UserToDeployment.userId == current_user.userId)
+        deployments_q = deployments_q.filter(
+            or_(
+                Deployment.userId == current_user.userId,
+                Deployment.deploymentId.in_(member_deployment_ids_via_teams),
+                Deployment.deploymentId.in_(member_deployment_ids_direct),
+            )
+        )
+
+    deployments_total = deployments_q.scalar() or 0
 
     apps_total = (
         db.query(func.count(App.appId))
@@ -57,7 +88,7 @@ def get_dashboard_stats(
     courses_total = db.query(func.count(Course.courseId)).scalar() or 0
 
     return DashboardStatsResponse(
-        deployments=deployments_running,
+        deployments=deployments_total,
         apps=apps_total,
         courses=courses_total,
     )
