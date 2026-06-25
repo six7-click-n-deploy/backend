@@ -6,6 +6,8 @@ from sqlalchemy.orm import Session
 from app.database import get_db
 from app.models import (
     App,
+    AppVersionApproval,
+    AppVersionApprovalStatus,
     Course,
     Deployment,
     Team,
@@ -45,8 +47,18 @@ def get_dashboard_stats(
       * Student:       deployments they own OR are a team member of OR
                        have a direct ``UserToDeployment`` mapping for.
 
-    Soft-deleted rows (``deleted_at IS NOT NULL``) are excluded — same
-    as the list endpoint, backed by ``ix_deployments_live``.
+    Apps counter MUST mirror the visibility rules of ``GET /apps``
+    (i.e. ``crud_apps.get_apps``):
+
+      * Always: apps owned by the requesting user (regardless of
+        ``is_private``, even if no version is approved yet).
+      * Additionally: public apps (``is_private = False``) that have
+        at least one APPROVED version. Public-but-unapproved apps are
+        invisible to everyone except the owner and admins, so they
+        must NOT inflate the counter.
+
+    Soft-deleted rows (``deleted_at IS NOT NULL``) are excluded on both
+    counters — same as the list endpoints.
     """
     deployments_q = (
         db.query(func.count(Deployment.deploymentId))
@@ -79,9 +91,25 @@ def get_dashboard_stats(
 
     deployments_total = deployments_q.scalar() or 0
 
+    # Apps visible to the user — same rule as ``crud_apps.get_apps``.
+    # The subquery returns every appId that has at least one APPROVED
+    # version, used as the gate for the public branch of the OR.
+    approved_app_ids = (
+        db.query(AppVersionApproval.appId)
+        .filter(AppVersionApproval.status == AppVersionApprovalStatus.APPROVED)
+        .distinct()
+        .scalar_subquery()
+    )
     apps_total = (
         db.query(func.count(App.appId))
-        .filter(App.userId == current_user.userId)
+        .filter(App.deleted_at.is_(None))
+        .filter(
+            or_(
+                App.userId == current_user.userId,
+                (App.is_private == False)  # noqa: E712
+                & App.appId.in_(approved_app_ids),
+            )
+        )
         .scalar()
     ) or 0
 
