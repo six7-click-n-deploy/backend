@@ -6,6 +6,8 @@ from sqlalchemy.orm import Session
 from app.database import get_db
 from app.models import (
     App,
+    AppVersionApproval,
+    AppVersionApprovalStatus,
     Course,
     Deployment,
     Team,
@@ -45,8 +47,20 @@ def get_dashboard_stats(
       * Student:       deployments they own OR are a team member of OR
                        have a direct ``UserToDeployment`` mapping for.
 
-    Soft-deleted rows (``deleted_at IS NOT NULL``) are excluded — same
-    as the list endpoint, backed by ``ix_deployments_live``.
+    Apps counter MUST mirror the role-branched visibility of
+    ``GET /apps`` (see ``routers/apps.py``):
+
+      * Teacher/Admin: every non-deleted app — exactly what
+        ``crud_apps.get_apps`` returns when called without
+        ``user_id``. Staff sees the whole catalog including public-
+        unapproved and private third-party apps; the KPI must too.
+      * Student/regular: own apps (regardless of ``is_private`` /
+        approval state) OR public apps (``is_private = False``)
+        with at least one APPROVED version — mirrors
+        ``crud_apps.get_visible_apps``.
+
+    Soft-deleted rows (``deleted_at IS NOT NULL``) are excluded on both
+    counters — same as the list endpoints.
     """
     deployments_q = (
         db.query(func.count(Deployment.deploymentId))
@@ -79,11 +93,35 @@ def get_dashboard_stats(
 
     deployments_total = deployments_q.scalar() or 0
 
-    apps_total = (
-        db.query(func.count(App.appId))
-        .filter(App.userId == current_user.userId)
-        .scalar()
-    ) or 0
+    # Apps visible to the user — role-branched, same gate as the
+    # ``/apps`` endpoint at ``routers/apps.py``. Teacher/Admin see
+    # everything non-deleted (mirrors ``crud_apps.get_apps``); students
+    # see own + public-approved (mirrors ``crud_apps.get_visible_apps``).
+    if current_user.role in (UserRole.TEACHER, UserRole.ADMIN):
+        apps_total = (
+            db.query(func.count(App.appId))
+            .filter(App.deleted_at.is_(None))
+            .scalar()
+        ) or 0
+    else:
+        approved_app_ids = (
+            db.query(AppVersionApproval.appId)
+            .filter(AppVersionApproval.status == AppVersionApprovalStatus.APPROVED)
+            .distinct()
+            .scalar_subquery()
+        )
+        apps_total = (
+            db.query(func.count(App.appId))
+            .filter(App.deleted_at.is_(None))
+            .filter(
+                or_(
+                    App.userId == current_user.userId,
+                    (App.is_private == False)  # noqa: E712
+                    & App.appId.in_(approved_app_ids),
+                )
+            )
+            .scalar()
+        ) or 0
 
     courses_total = db.query(func.count(Course.courseId)).scalar() or 0
 
