@@ -2,6 +2,7 @@ import contextlib
 import logging
 import os
 import re
+from dataclasses import dataclass
 from typing import Any
 from uuid import UUID
 
@@ -96,6 +97,13 @@ class AppVariableResponse(BaseModel):
     varScope: str | None = None
     fileExtensions: list[str] | None = None
     markerError: _MarkerErrorPayload | None = None
+    # ``template_key`` is null for ``source = terraform`` variables and
+    # carries the per-template key (``default`` for the legacy layout,
+    # or the subdirectory name like ``webserver``/``database`` in
+    # multi-image apps) for ``source = packer`` variables. Lets the
+    # wizard group Packer variables per image and avoid name collisions
+    # across templates.
+    template_key: str | None = None
 
 
 # ----------------------------------------------------------------
@@ -1080,6 +1088,16 @@ def _parse_terraform_variables(file_path: str) -> list[dict[str, Any]]:
         # Filter: users und image_name rauslassen
         if var_name == "users" or var_name == "image_name":
             continue
+        # Multi-image apps declare ``image_name_<key>`` per template and
+        # mark those declarations with ``@platform:internal`` in the
+        # description. The worker fills these from the discovered Packer
+        # templates; the wizard must not surface them as user-editable
+        # variables. Same rationale as the ``image_name``/``users``
+        # filter above — these are platform-injected, not user input.
+        desc_match = re.search(r'description\s*=\s*"([^"]*)"', var_block)
+        description = desc_match.group(1) if desc_match else ""
+        if "@platform:internal" in description:
+            continue
         variables.append(_parse_one_variable(
             var_name=var_name,
             var_block=var_block,
@@ -1092,9 +1110,15 @@ def _parse_terraform_variables(file_path: str) -> list[dict[str, Any]]:
     return variables
 
 
-def _parse_packer_variables(file_path: str) -> list[dict[str, Any]]:
+def _parse_packer_variables(file_path: str, template_key: str = "default") -> list[dict[str, Any]]:
     """Parse Packer `variables.pkr.hcl` file. Marker-Fehler reisen pro
-    Variable im ``markerError``-Feld mit; siehe ``_parse_one_variable``."""
+    Variable im ``markerError``-Feld mit; siehe ``_parse_one_variable``.
+
+    ``template_key`` is recorded on each variable so the wizard can
+    group Packer variables per template (and avoid name collisions
+    across templates in multi-image apps). For the legacy single-
+    template layout the caller passes ``"default"``.
+    """
     with open(file_path) as f:
         content = f.read()
 
@@ -1108,16 +1132,142 @@ def _parse_packer_variables(file_path: str) -> list[dict[str, Any]]:
         # Filter: image_name rauslassen
         if var_name == "image_name":
             continue
-        variables.append(_parse_one_variable(
+        var_info = _parse_one_variable(
             var_name=var_name,
             var_block=var_block,
             var_block_offset=match.start(),
             file_content=content,
-            file_label="packer/variables.pkr.hcl",
+            file_label=f"packer/{template_key}/variables.pkr.hcl"
+            if template_key != "default"
+            else "packer/variables.pkr.hcl",
             source="packer",
-        ))
+        )
+        var_info["template_key"] = template_key
+        variables.append(var_info)
 
     return variables
+
+
+# ----------------------------------------------------------------
+# PACKER TEMPLATE DISCOVERY
+# ----------------------------------------------------------------
+# Apps may ship Packer templates in one of two layouts:
+#
+#  1. Legacy single-template layout:
+#         packer/template.pkr.hcl
+#         packer/variables.pkr.hcl
+#     → exactly ONE image, conventionally keyed ``default``. The
+#       worker injects ``image_name`` (a single Terraform variable).
+#
+#  2. Multi-template layout:
+#         packer/<key>/template.pkr.hcl
+#         packer/<key>/variables.pkr.hcl   (optional)
+#     → one image per ``<key>``. The worker injects one
+#       ``image_name_<key>`` Terraform variable per template, each
+#       marked ``@platform:internal`` in its description so the wizard
+#       skips them.
+#
+# Discovery rules:
+#   - No ``packer/`` directory → returns ``[]`` (no Packer phase).
+#   - Legacy file present       → returns ``[_PackerTemplate("default", ...)]``.
+#   - Subdirectories with a
+#     ``template.pkr.hcl``      → returns one entry per subdir, sorted.
+#   - Both legacy AND subdirs   → ``PackerTemplateDiscoveryError`` (hard).
+#   - Subdir without
+#     ``template.pkr.hcl``      → ignored (e.g. ``_common/``, ``scripts/``).
+#   - Subdir with a key that
+#     doesn't match the pattern → ``PackerTemplateDiscoveryError``.
+#
+# Key pattern is intentionally narrow (``[a-z][a-z0-9_-]{0,30}``) so
+# the key is safe to embed in Terraform variable names and image
+# tags without quoting.
+# ----------------------------------------------------------------
+
+@dataclass
+class _PackerTemplate:
+    """One Packer template discovered under ``<repo>/packer``.
+
+    ``variables_path`` may point at a non-existing file — the caller
+    must check ``os.path.isfile`` before reading it. We don't filter
+    here because the file is optional and a missing one is not an
+    error.
+    """
+
+    key: str
+    template_path: str
+    variables_path: str
+
+
+_TEMPLATE_KEY_RE = re.compile(r"^[a-z][a-z0-9_-]{0,30}$")
+
+
+class PackerTemplateDiscoveryError(ValueError):
+    """Raised when the Packer directory has a layout the platform can't
+    reconcile (ambiguous, contradictory, or with an unsafe key).
+
+    Translated to HTTP 422 at the load_variable_definitions boundary
+    so the app author sees the error immediately on the first
+    ``GET /apps/{id}/variables`` instead of at first deploy.
+    """
+
+
+def _discover_packer_templates(repo_path: str) -> list[_PackerTemplate]:
+    """Walk ``<repo_path>/packer`` and return the list of templates the
+    worker will build for this app.
+
+    See the section docstring above for the layout rules. Returns
+    ``[]`` for apps without any Packer at all (Terraform-only).
+    """
+    packer_dir = os.path.join(repo_path, "packer")
+    if not os.path.isdir(packer_dir):
+        return []
+
+    legacy_template = os.path.join(packer_dir, "template.pkr.hcl")
+    has_legacy = os.path.isfile(legacy_template)
+
+    multi_templates: list[_PackerTemplate] = []
+    bad_keys: list[str] = []
+    for entry in sorted(os.listdir(packer_dir)):
+        sub = os.path.join(packer_dir, entry)
+        if not os.path.isdir(sub):
+            continue
+        tmpl = os.path.join(sub, "template.pkr.hcl")
+        if not os.path.isfile(tmpl):
+            # Subdirs without a template (``_common/``, ``scripts/``,
+            # ``http/`` for boot-time HTTP servers, ...) are silently
+            # ignored — they're tooling, not images to build.
+            continue
+        if not _TEMPLATE_KEY_RE.match(entry):
+            bad_keys.append(entry)
+            continue
+        multi_templates.append(_PackerTemplate(
+            key=entry,
+            template_path=tmpl,
+            variables_path=os.path.join(sub, "variables.pkr.hcl"),
+        ))
+
+    if bad_keys:
+        raise PackerTemplateDiscoveryError(
+            f"Packer template subdirectories with invalid keys "
+            f"(must match [a-z][a-z0-9_-]{{0,30}}): {bad_keys}"
+        )
+
+    if has_legacy and multi_templates:
+        raise PackerTemplateDiscoveryError(
+            "App repository has BOTH packer/template.pkr.hcl (legacy "
+            "layout) AND packer/<key>/template.pkr.hcl subdirectories "
+            f"({[t.key for t in multi_templates]}). Choose one layout "
+            "— remove the legacy file or the subdirectories."
+        )
+
+    if has_legacy:
+        return [_PackerTemplate(
+            key="default",
+            template_path=legacy_template,
+            variables_path=os.path.join(packer_dir, "variables.pkr.hcl"),
+        )]
+
+    return multi_templates
 
 
 # ----------------------------------------------------------------
@@ -1239,9 +1389,25 @@ def load_variable_definitions(app, version: str) -> list[dict[str, Any]]:
         tf_vars_path = os.path.join(repo_path, "terraform", "variables.tf")
         if os.path.exists(tf_vars_path):
             variables.extend(_parse_terraform_variables(tf_vars_path))
-        packer_vars_path = os.path.join(repo_path, "packer", "variables.pkr.hcl")
-        if os.path.exists(packer_vars_path):
-            variables.extend(_parse_packer_variables(packer_vars_path))
+        # Discover all Packer templates (legacy single-file layout OR
+        # per-key subdirectories) and parse each one's variables. The
+        # ``template_key`` is recorded on every Packer variable so the
+        # wizard can group inputs per image. Discovery raises if the
+        # repo has an ambiguous or unsafe layout — surface that as
+        # HTTP 422 so the app author can fix the repo before any
+        # deploy attempt.
+        try:
+            templates = _discover_packer_templates(repo_path)
+        except PackerTemplateDiscoveryError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=str(exc),
+            )
+        for tmpl in templates:
+            if os.path.isfile(tmpl.variables_path):
+                variables.extend(
+                    _parse_packer_variables(tmpl.variables_path, template_key=tmpl.key)
+                )
         return variables
     except HTTPException:
         raise
