@@ -1596,6 +1596,29 @@ def submit_version(
             detail="App has no git repository configured",
         )
 
+    # Marker-Validierung — blockt Submit bei fehlerhaften @openstack-Markern.
+    # Identische Logik wie beim Approve-Endpoint; git-Fehler (400/500) werden
+    # still übergangen, damit Submit auch bei nicht erreichbarem Repo klappt.
+    try:
+        variables = load_variable_definitions(app, version_tag)
+        marker_errors = [v.get("markerError") for v in variables if v.get("markerError")]
+        if marker_errors:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail={
+                    "message": (
+                        "Version kann nicht eingereicht werden — fehlerhafte "
+                        "@openstack-Marker in den Variablen-Dateien"
+                    ),
+                    "marker_errors": marker_errors,
+                },
+            )
+    except HTTPException as exc:
+        if exc.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY:
+            raise
+        # 400 (kein git_link bereits oben behandelt) oder 500 (Git nicht
+        # erreichbar) — Submit trotzdem erlauben.
+
     return crud_approvals.submit_version(
         db, app_id=app_id, version_tag=version_tag, diff_url=body.diff_url, notes=body.notes
     )

@@ -3,11 +3,14 @@ Tests for the app release workflow (issue #70).
 
 Coverage:
 - Version submission (happy path, duplicate, resubmit-after-reject)
+- Marker validation blocking submit (issue #82 follow-up)
 - Admin approve / reject / revoke
 - App listing visibility rules (public+approved vs private)
 - git_link immutability via PUT /apps/{id}
 - is_private field on create and update
 """
+from unittest.mock import patch
+
 import pytest
 
 from app.crud import app_version_approvals as crud_approvals
@@ -78,6 +81,37 @@ def test_resubmit_after_rejection_succeeds(client, mock_admin, mock_user, db):
     crud_approvals.reject(db, app_obj.appId, "v1.0", mock_admin.userId, "bad terraform")
 
     resp = client.post(f"/apps/{app_obj.appId}/versions/v1.0/submit", json={})
+    assert resp.status_code == 201
+    assert resp.json()["status"] == "pending"
+
+
+# ================================================================
+# MARKER VALIDATION ON SUBMIT
+# ================================================================
+
+@pytest.mark.api
+def test_submit_blocked_when_marker_errors(client, mock_user, db):
+    app_obj = create_app_in_db(db, mock_user)
+    broken_vars = [{"name": "flavor", "markerError": {
+        "variable": "flavor",
+        "message": "Unknown OS type: 'flaavoor'. Did you mean 'flavor'?",
+        "location": "terraform/variables.tf:5",
+        "code": "MARKER_UNKNOWN_OS_TYPE",
+    }}]
+    with patch("app.routers.apps.load_variable_definitions", return_value=broken_vars):
+        resp = client.post(f"/apps/{app_obj.appId}/versions/v1.0/submit", json={})
+    assert resp.status_code == 422
+    detail = resp.json()["detail"]
+    assert "marker_errors" in detail
+    assert detail["marker_errors"][0]["code"] == "MARKER_UNKNOWN_OS_TYPE"
+
+
+@pytest.mark.api
+def test_submit_succeeds_with_clean_markers(client, mock_user, db):
+    app_obj = create_app_in_db(db, mock_user)
+    clean_vars = [{"name": "flavor", "description": "@openstack:flavor", "osType": "flavor"}]
+    with patch("app.routers.apps.load_variable_definitions", return_value=clean_vars):
+        resp = client.post(f"/apps/{app_obj.appId}/versions/v1.0/submit", json={})
     assert resp.status_code == 201
     assert resp.json()["status"] == "pending"
 
