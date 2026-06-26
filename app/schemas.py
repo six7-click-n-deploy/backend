@@ -163,6 +163,7 @@ class AppWithVersions(AppWithUser):
 # ----------------------------------------------------------------
 class AppVersionApprovalSubmit(BaseModel):
     diff_url: str | None = None
+    notes: str | None = None
 
 
 class AppVersionApprovalDecision(BaseModel):
@@ -175,6 +176,7 @@ class AppVersionApprovalResponse(BaseModel):
     version_tag: str
     status: AppVersionApprovalStatus
     diff_url: str | None = None
+    notes: str | None = None
     rejection_reason: str | None = None
     reviewed_by: UUID | None = None
     reviewed_at: datetime | None = None

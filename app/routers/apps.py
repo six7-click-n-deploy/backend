@@ -1597,7 +1597,7 @@ def submit_version(
         )
 
     return crud_approvals.submit_version(
-        db, app_id=app_id, version_tag=version_tag, diff_url=body.diff_url
+        db, app_id=app_id, version_tag=version_tag, diff_url=body.diff_url, notes=body.notes
     )
 
 

@@ -117,12 +117,13 @@ def reject_version(
 def revoke_version(
     app_id: UUID,
     version_tag: str,
+    body: AppVersionApprovalDecision,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_admin),
 ):
-    """Revoke a previously APPROVED version (sets status to REJECTED)."""
+    """Revoke a previously APPROVED version with a mandatory reason (sets status to REJECTED)."""
     _require_app(db, app_id)
-    return crud_approvals.revoke(db, app_id, version_tag, current_user.userId)
+    return crud_approvals.revoke(db, app_id, version_tag, current_user.userId, body.rejection_reason)
 
 
 # ----------------------------------------------------------------
