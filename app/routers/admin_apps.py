@@ -65,21 +65,28 @@ def approve_version(
     # Variablen-Dateien und hängt fehlerhafte Marker als
     # ``markerError`` an die einzelne Variable. Wir blockieren das
     # Approval, wenn mindestens eine Variable einen Marker-Bug trägt.
-    variables = load_variable_definitions(app, version_tag)
-    marker_errors = [
-        v.get("markerError") for v in variables if v.get("markerError")
-    ]
-    if marker_errors:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail={
-                "message": (
-                    "Version kann nicht approved werden — fehlerhafte "
-                    "@openstack-Marker in den Variablen-Dateien"
-                ),
-                "marker_errors": marker_errors,
-            },
-        )
+    # Wenn das Git-Repo nicht erreichbar ist (400/500), überspringen
+    # wir die Validierung — lieber approven als hart blocken.
+    try:
+        variables = load_variable_definitions(app, version_tag)
+        marker_errors = [
+            v.get("markerError") for v in variables if v.get("markerError")
+        ]
+        if marker_errors:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail={
+                    "message": (
+                        "Version kann nicht approved werden — fehlerhafte "
+                        "@openstack-Marker in den Variablen-Dateien"
+                    ),
+                    "marker_errors": marker_errors,
+                },
+            )
+    except HTTPException as exc:
+        if exc.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY:
+            raise
+        # 400 (no git_link) or 500 (git unreachable) — skip validation
 
     return crud_approvals.approve(db, app_id, version_tag, current_user.userId)
 

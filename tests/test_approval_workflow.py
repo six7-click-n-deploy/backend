@@ -123,9 +123,13 @@ def test_admin_revoke_approved_version(client, admin_client, mock_user, db):
     app_obj = create_app_in_db(db, mock_user)
     client.post(f"/apps/{app_obj.appId}/versions/v1.0/submit", json={})
     admin_client.post(f"/admin/apps/{app_obj.appId}/versions/v1.0/approve")
-    resp = admin_client.post(f"/admin/apps/{app_obj.appId}/versions/v1.0/revoke")
+    resp = admin_client.post(
+        f"/admin/apps/{app_obj.appId}/versions/v1.0/revoke",
+        json={"rejection_reason": "security issue discovered post-approval"},
+    )
     assert resp.status_code == 200
     assert resp.json()["status"] == "rejected"
+    assert resp.json()["rejection_reason"] == "security issue discovered post-approval"
 
 
 @pytest.mark.api
@@ -149,13 +153,15 @@ def test_admin_pending_queue_contains_submission(client, admin_client, mock_user
 # ================================================================
 
 @pytest.mark.api
-def test_update_app_git_link_returns_422(client, mock_user, db):
+def test_update_app_git_link_is_ignored(client, mock_user, db):
     app_obj = create_app_in_db(db, mock_user)
+    original_git_link = app_obj.git_link
     resp = client.put(
         f"/apps/{app_obj.appId}",
         json={"git_link": "https://github.com/evil/repo"},
     )
-    assert resp.status_code == 422
+    assert resp.status_code == 200
+    assert resp.json()["git_link"] == original_git_link
 
 
 @pytest.mark.api
