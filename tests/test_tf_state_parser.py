@@ -4,8 +4,7 @@ Pure-function coverage: no FastAPI, no DB, no OpenStack SDK.
 """
 import pytest
 
-from app.services.tf_state_parser import TfResource, parse_tf_state
-
+from app.services.tf_state_parser import parse_tf_state
 
 # ----------------------------------------------------------------
 # Fixture state — mirrors the shape of the Online-IDE app's state

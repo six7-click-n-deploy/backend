@@ -12,7 +12,6 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from sqlalchemy import desc
 from sqlalchemy.orm import Session
 
-from app.crud import app_version_approvals as crud_approvals
 from app.crud import apps as crud_apps
 from app.crud import deployments as crud_deployments
 from app.crud import locks as crud_locks
@@ -530,9 +529,7 @@ def _validate_scoped_user_input(
             return True
         if isinstance(val, str) and val == "":
             return True
-        if isinstance(val, (list, dict)) and len(val) == 0:
-            return True
-        return False
+        return isinstance(val, (list, dict)) and len(val) == 0
 
     for source_key in ("terraform", "packer"):
         block = user_input_var.get(source_key)
@@ -567,7 +564,7 @@ def _validate_scoped_user_input(
                         "scope": scope,
                     },
                 )
-            for slot_key in value.keys():
+            for slot_key in value:
                 if scope == "team":
                     if slot_key not in team_names:
                         raise HTTPException(
@@ -771,9 +768,11 @@ def create_deployment(
         release_tag = deployment.releaseTag or "main"
         try:
             variable_definitions = load_variable_definitions(target_app, release_tag)
-        except HTTPException:
-            # Re-raise — the helper already produces a sensible error.
-            raise
+        except HTTPException as exc:
+            if exc.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY:
+                raise
+            # 400 (no git_link) or 500 (git unreachable) — skip validation,
+            # proceed without variable definitions.
 
     # Fold the wizard's parallel ``files`` upload into
     # ``userInputVar.terraform`` before the row gets persisted, so the
