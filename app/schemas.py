@@ -124,14 +124,14 @@ class AppUpdate(BaseModel):
     name: str | None = None
     description: str | None = None
     # git_link is immutable after creation — omitted here intentionally.
-    # The router returns HTTP 400 if a caller includes it in the body.
+    # Callers may include it; it is silently ignored (extra="ignore").
     is_private: bool | None = None
     # Same data-URL convention as ``AppCreate``. Pass ``""`` (empty
     # string) to explicitly clear the image; ``None`` (the default)
     # leaves it unchanged.
     image: str | None = None
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="ignore")
 
 
 class AppResponse(AppBase):
@@ -163,6 +163,7 @@ class AppWithVersions(AppWithUser):
 # ----------------------------------------------------------------
 class AppVersionApprovalSubmit(BaseModel):
     diff_url: str | None = None
+    notes: str | None = None
 
 
 class AppVersionApprovalDecision(BaseModel):
@@ -175,6 +176,7 @@ class AppVersionApprovalResponse(BaseModel):
     version_tag: str
     status: AppVersionApprovalStatus
     diff_url: str | None = None
+    notes: str | None = None
     rejection_reason: str | None = None
     reviewed_by: UUID | None = None
     reviewed_at: datetime | None = None

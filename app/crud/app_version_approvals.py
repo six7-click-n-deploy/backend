@@ -4,7 +4,7 @@ from uuid import UUID
 from fastapi import HTTPException, status
 from sqlalchemy.orm import Session
 
-from app.models import AppVersionApproval, AppVersionApprovalStatus
+from app.models import App, AppVersionApproval, AppVersionApprovalStatus
 
 
 def submit_version(
@@ -12,6 +12,7 @@ def submit_version(
     app_id: UUID,
     version_tag: str,
     diff_url: str | None = None,
+    notes: str | None = None,
 ) -> AppVersionApproval:
     """Submit a version for admin review.
 
@@ -48,6 +49,7 @@ def submit_version(
         appId=app_id,
         version_tag=version_tag,
         diff_url=diff_url,
+        notes=notes,
         status=AppVersionApprovalStatus.PENDING,
         created_at=datetime.utcnow(),
     )
@@ -58,10 +60,14 @@ def submit_version(
 
 
 def get_pending_approvals(db: Session) -> list[AppVersionApproval]:
-    """Return all PENDING version approvals across all apps."""
+    """Return all PENDING version approvals for public apps, oldest first."""
     return (
         db.query(AppVersionApproval)
-        .filter(AppVersionApproval.status == AppVersionApprovalStatus.PENDING)
+        .join(App, App.appId == AppVersionApproval.appId)
+        .filter(
+            AppVersionApproval.status == AppVersionApprovalStatus.PENDING,
+            App.is_private.is_(False),
+        )
         .order_by(AppVersionApproval.created_at.asc())
         .all()
     )
@@ -189,6 +195,7 @@ def revoke(
     app_id: UUID,
     version_tag: str,
     admin_id: UUID,
+    rejection_reason: str,
 ) -> AppVersionApproval:
     """Revoke a previously APPROVED version (sets status back to REJECTED)."""
     approval = _get_approval_or_404(db, app_id, version_tag)
@@ -202,6 +209,7 @@ def revoke(
     approval.status = AppVersionApprovalStatus.REJECTED
     approval.reviewed_by = admin_id
     approval.reviewed_at = datetime.utcnow()
+    approval.rejection_reason = rejection_reason
     db.commit()
     db.refresh(approval)
     return approval
