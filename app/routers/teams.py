@@ -20,15 +20,19 @@ router = APIRouter()
 def list_teams(
     skip: int = 0,
     limit: int = 100,
-    user_group_id: UUID | None = None,
+    deployment_id: UUID | None = None,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user_keycloak)
 ):
     """
-    Get all teams with optional user group filter
-    - **All authenticated users** can view teams
+    Get all teams, optionally filtered to a single deployment.
+
+    The ``deployment_id`` query parameter replaces the old
+    ``user_group_id`` filter, which referenced a model that no
+    longer exists. All authenticated users may list teams; per-team
+    membership gating happens at ``GET /teams/{team_id}``.
     """
-    teams = crud_teams.get_teams(db, skip=skip, limit=limit, user_group_id=user_group_id)
+    teams = crud_teams.get_teams(db, skip=skip, limit=limit, deployment_id=deployment_id)
     return teams
 
 

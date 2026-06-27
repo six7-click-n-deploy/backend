@@ -100,7 +100,7 @@ def patched_celery():
         yield m
 
 
-@pytest.mark.api
+@pytest.mark.integration
 def test_pause_dispatches_when_status_is_success(
     client, db, mock_user, patched_celery,
 ):
@@ -130,7 +130,7 @@ def test_pause_dispatches_when_status_is_success(
     assert patched_celery.call_args.args[0] == "tasks.pause_deployment"
 
 
-@pytest.mark.api
+@pytest.mark.integration
 @pytest.mark.parametrize(
     "task_type, task_status",
     [
@@ -163,7 +163,7 @@ def test_pause_rejected_when_not_success(
     patched_celery.assert_not_called()
 
 
-@pytest.mark.api
+@pytest.mark.integration
 def test_resume_dispatches_when_status_is_paused(
     client, db, mock_user, patched_celery,
 ):
@@ -189,7 +189,7 @@ def test_resume_dispatches_when_status_is_paused(
     assert patched_celery.call_args.args[0] == "tasks.resume_deployment"
 
 
-@pytest.mark.api
+@pytest.mark.integration
 def test_resume_rejected_when_not_paused(
     client, db, mock_user, patched_celery,
 ):
@@ -204,7 +204,7 @@ def test_resume_rejected_when_not_paused(
     patched_celery.assert_not_called()
 
 
-@pytest.mark.api
+@pytest.mark.integration
 def test_destroy_allowed_from_paused(
     client, db, mock_user, patched_celery,
 ):
@@ -219,7 +219,7 @@ def test_destroy_allowed_from_paused(
     assert response.json()["status"] == "destroying"
 
 
-@pytest.mark.api
+@pytest.mark.integration
 def test_pause_404_for_unknown_deployment(client):
     bogus = uuid.uuid4()
     response = client.post(f"/deployments/{bogus}/pause")
@@ -248,7 +248,7 @@ IN_FLIGHT_TASK_FIXTURES = [
 ]
 
 
-@pytest.mark.api
+@pytest.mark.integration
 @pytest.mark.parametrize(
     "task_type, task_status, expected_status_text", IN_FLIGHT_TASK_FIXTURES
 )
@@ -274,7 +274,7 @@ def test_delete_rejected_while_action_in_flight(
     patched_celery.assert_not_called()
 
 
-@pytest.mark.api
+@pytest.mark.integration
 @pytest.mark.parametrize(
     "task_type, task_status, expected_status_text", IN_FLIGHT_TASK_FIXTURES
 )
@@ -292,7 +292,7 @@ def test_resume_rejected_while_action_in_flight(
     patched_celery.assert_not_called()
 
 
-@pytest.mark.api
+@pytest.mark.integration
 @pytest.mark.parametrize(
     "task_type, task_status, expected_status_text", IN_FLIGHT_TASK_FIXTURES
 )
@@ -332,7 +332,7 @@ def test_resend_access_rejected_while_action_in_flight(
     assert response.status_code == 409
 
 
-@pytest.mark.api
+@pytest.mark.integration
 def test_pause_failed_status_allows_retry(client, db, mock_user, patched_celery):
     """A previously failed pause must still allow a fresh PAUSE
     attempt — the deployment itself is unaffected. Mirrors the
@@ -348,7 +348,7 @@ def test_pause_failed_status_allows_retry(client, db, mock_user, patched_celery)
     assert response.json()["status"] == "pausing"
 
 
-@pytest.mark.api
+@pytest.mark.integration
 def test_destroy_allowed_from_pause_failed(client, db, mock_user, patched_celery):
     """User can give up on a stuck pause and tear it down."""
     deployment = _make_deployment_with_creds(

@@ -12,14 +12,14 @@ from app.utils.keycloak_auth import get_current_user_keycloak
 from tests.conftest import TestingSessionLocal
 
 
-@pytest.mark.api
+@pytest.mark.integration
 def test_get_apps_authenticated(client):
     response = client.get("/apps/")
     assert response.status_code == 200
     assert isinstance(response.json(), list)
 
 
-@pytest.mark.api
+@pytest.mark.integration
 def test_get_apps_unauthenticated(unauth_client):
     response = unauth_client.get("/apps/")
     assert response.status_code in (401, 403)
@@ -49,7 +49,7 @@ def existing_app(db, mock_user):
     )
 
 
-@pytest.mark.api
+@pytest.mark.integration
 def test_update_app_changes_name_and_description(client, existing_app, db):
     response = client.put(
         f"/apps/{existing_app.appId}",
@@ -69,7 +69,7 @@ def test_update_app_changes_name_and_description(client, existing_app, db):
     assert refreshed.git_link == ORIGINAL_GIT_LINK
 
 
-@pytest.mark.api
+@pytest.mark.integration
 def test_update_app_ignores_git_link(client, existing_app, db):
     """Sending ``git_link`` in the request body must be silently ignored."""
     response = client.put(
@@ -88,7 +88,7 @@ def test_update_app_ignores_git_link(client, existing_app, db):
     assert refreshed.name == "Renamed"
 
 
-@pytest.mark.api
+@pytest.mark.integration
 def test_update_app_not_found(client):
     response = client.put(
         f"/apps/{uuid.uuid4()}",
@@ -97,7 +97,7 @@ def test_update_app_not_found(client):
     assert response.status_code == 404
 
 
-@pytest.mark.api
+@pytest.mark.integration
 def test_update_app_unauthorized_user_rejected(db, existing_app):
     """A STUDENT who is not the owner must not be able to update the app."""
     other_student = User(
@@ -141,7 +141,7 @@ def test_update_app_unauthorized_user_rejected(db, existing_app):
 # auf fremden Apps weder Edit- noch Delete-Recht; nur Admin behält den
 # blanket-Zugriff. Eigene Apps (Teacher als Owner) bleiben unverändert
 # editierbar.
-@pytest.mark.api
+@pytest.mark.integration
 def test_teacher_cannot_update_foreign_app(db, existing_app):
     """Phase 2 — Bug #2: ein TEACHER, der nicht Owner ist, darf
     fremde Apps NICHT editieren. Vor Phase 2: 200 (Teacher-Bypass).
@@ -180,7 +180,7 @@ def test_teacher_cannot_update_foreign_app(db, existing_app):
         fastapi_app.dependency_overrides.clear()
 
 
-@pytest.mark.api
+@pytest.mark.integration
 def test_teacher_cannot_delete_foreign_app(db, existing_app):
     """Phase 2 — Bug #2: ein TEACHER darf fremde Apps NICHT löschen."""
     other_teacher = User(
@@ -213,7 +213,7 @@ def test_teacher_cannot_delete_foreign_app(db, existing_app):
         fastapi_app.dependency_overrides.clear()
 
 
-@pytest.mark.api
+@pytest.mark.integration
 def test_admin_can_delete_foreign_app(db, existing_app):
     """Admin behält den blanket-Delete auf fremde Apps."""
     admin = User(
@@ -249,7 +249,7 @@ def test_admin_can_delete_foreign_app(db, existing_app):
 # ---------------------------------------------------------------------------
 # Phase 2 — Bug #1: Role-Change ist Admin-only
 # ---------------------------------------------------------------------------
-@pytest.mark.api
+@pytest.mark.integration
 def test_non_admin_cannot_change_user_role(db, mock_user):
     """Phase 2 — Bug #1: nur Admin darf ``role`` auf ``PUT /users/{id}``
     setzen. Ein Teacher-Caller bekommt 403 mit
@@ -295,7 +295,7 @@ def test_non_admin_cannot_change_user_role(db, mock_user):
         fastapi_app.dependency_overrides.clear()
 
 
-@pytest.mark.api
+@pytest.mark.integration
 def test_admin_can_change_user_role(db):
     """Admin-Caller darf die Rolle eines anderen Users ändern."""
     admin = User(

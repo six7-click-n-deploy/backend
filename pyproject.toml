@@ -41,10 +41,22 @@ cryptography = ">=42.0.0"
 PyYAML = ">=6.0"
 jinja2 = ">=3.1.0"
 
-[tool.poetry.dev-dependencies]
+[tool.poetry.group.dev.dependencies]
+# Poetry 2.x dependency-group syntax. The older
+# ``[tool.poetry.dev-dependencies]`` form is deprecated and emits a
+# warning in Poetry ≥1.2 — and CI's ``poetry install --with dev``
+# only resolves group-style dev-deps reliably. Keeping the new form
+# is the simplest path to make ``--with dev`` install pytest-timeout
+# everywhere (host, container, CI runner).
 pytest = ">=7.4.4"
 pytest-asyncio = ">=0.23.3"
 pytest-cov = ">=4.1.0"
+# pytest-timeout: kills a single test after ``timeout`` seconds so a
+# hung connection (e.g. psycopg2 blocked on a Postgres lock) cannot
+# freeze the entire run. ``timeout_method = "thread"`` is essential
+# — the default ``signal`` method cannot interrupt C-extension calls
+# like psycopg2.recv(), which is exactly what hung the suite before.
+pytest-timeout = ">=2.3.0"
 httpx = ">=0.26.0"
 ruff = ">=0.1.13"
 mypy = ">=1.8.0"
@@ -113,6 +125,7 @@ known-first-party = ["routers", "services", "utils", "models", "schemas", "datab
 minversion = "7.0"
 testpaths = ["tests"]
 pythonpath = ["."]
+asyncio_mode = "auto"
 addopts = [
     "-v",
     "--strict-markers",
@@ -121,6 +134,18 @@ addopts = [
     "--cov-report=term-missing",
     "--cov-report=html",
     "--cov-report=xml",
+    # Globaler Per-Test-Timeout: kein einzelner Test darf den
+    # Gesamtlauf einfrieren. 60 s ist großzügig für DB-Truncate +
+    # FastAPI-TestClient-Lifecycle, aber knapp genug, dass ein
+    # echter Hänger (z.B. SSE-Stream der nie schließt, psycopg2 im
+    # Lock-Wait) auffällt statt CI zu blockieren. Einzeltests dürfen
+    # mit ``@pytest.mark.timeout(N)`` lokal hochgesetzt werden.
+    "--timeout=60",
+    # ``thread`` ist Pflicht: das default-``signal``-Verfahren
+    # benutzt ``SIGALRM`` und kann C-Extension-Calls wie
+    # ``psycopg2.recv()`` nicht unterbrechen — exakt der Fall der
+    # zuvor die Suite gefressen hat.
+    "--timeout-method=thread",
 ]
 markers = [
     "slow: marks tests as slow (deselect with '-m \"not slow\"')",
@@ -149,6 +174,7 @@ omit = [
 precision = 2
 show_missing = true
 skip_covered = false
+fail_under = 50
 exclude_lines = [
     "pragma: no cover",
     "def __repr__",

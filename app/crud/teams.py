@@ -15,22 +15,32 @@ def get_teams(
     db: Session,
     skip: int = 0,
     limit: int = 100,
-    user_group_id: UUID | None = None
+    deployment_id: UUID | None = None
 ) -> list[Team]:
-    """Get teams with optional user group filter"""
+    """Get teams with optional deployment filter.
+
+    Renamed from ``user_group_id`` after the ``UserGroup`` model was
+    removed in the pre-RBAC refactor — teams now live directly under
+    a deployment.
+    """
     query = db.query(Team)
 
-    if user_group_id:
-        query = query.filter(Team.userGroupId == user_group_id)
+    if deployment_id:
+        query = query.filter(Team.deploymentId == deployment_id)
 
     return query.offset(skip).limit(limit).all()
 
 
 def create_team(db: Session, team: TeamCreate) -> Team:
-    """Create a new team"""
+    """Create a new team.
+
+    ``Team`` has a NOT NULL ``deploymentId`` FK — the request payload
+    must carry the deployment to attach to. The old ``userGroupId``
+    path is gone (``UserGroup`` no longer exists in the model layer).
+    """
     db_team = Team(
         name=team.name,
-        userGroupId=team.userGroupId
+        deploymentId=team.deploymentId
     )
     db.add(db_team)
     db.commit()

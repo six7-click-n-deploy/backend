@@ -83,7 +83,22 @@ jobs:
       - name: Run unit tests
         run: poetry run pytest -m unit -v
         env:
+          # ``DATABASE_URL`` muss gesetzt sein, weil ``app.config.Settings``
+          # es als Pflichtfeld deklariert — ohne wäre der App-Import in
+          # den Tests schon ein ValidationError. Ein separates
+          # ``TEST_DATABASE_URL`` brauchen wir hier nicht: der Conftest
+          # fällt auf ``settings.DATABASE_URL`` zurück, und auf dem
+          # Runner-VM gibt es ohnehin nur diese eine DB. Lokal ist die
+          # Trennung wichtig (Dev-DB vs. Wegwerf-Test-DB); in CI nicht.
           DATABASE_URL: "postgresql://test:test@localhost:5432/test"
+          # Lifespan-startup spawns a Celery event-listener + a
+          # reconciler asyncio task on every ``TestClient(app)``
+          # construct. Across hundreds of test-client contexts those
+          # daemons stack up, hold DB + broker connections, and
+          # eventually exhaust the SQLAlchemy pool / block on broker
+          # reads. This flag short-circuits the lifespan body in
+          # tests — production paths set neither var.
+          DISABLE_BACKGROUND_TASKS: "1"
           CREDENTIAL_ENCRYPTION_KEY: "Q1PNlFd4It9oQPtjCcXcmB7wGDkY4w8KwpIRNSF4u7U="
           KEYCLOAK_SERVER_URL: "http://localhost:8080"
           KEYCLOAK_REALM: "dhbw"
@@ -91,7 +106,7 @@ jobs:
           KEYCLOAK_CLIENT_SECRET: "test-secret"
           KEYCLOAK_ENABLED: "false"
           # Suffix the .coverage file so it can be merged in the
-          # `coverage` job alongside the integration / api job data.
+          # ``coverage`` job alongside the integration job data.
           COVERAGE_FILE: .coverage.unit
 
       - name: Upload coverage data (unit)
@@ -106,70 +121,14 @@ jobs:
   # ================================================================
   # 🧪 TEST (integration) — requires Postgres
   # ================================================================
+  # Covers every test in ``tests/`` that is NOT marked ``unit``. The
+  # old separate ``api`` lane was retired together with the marker —
+  # the integration suite now exercises the FastAPI app end-to-end
+  # via ``TestClient`` (see ``tests/test_*_api.py``), and there is
+  # no longer a meaningful unit/api split below the integration
+  # bar.
   test-integration:
     name: "🧪 Test (integration)"
-    runs-on: ubuntu-latest
-    needs: [test-api]
-
-    services:
-      postgres:
-        image: postgres:16-alpine
-        env:
-          POSTGRES_USER: test
-          POSTGRES_PASSWORD: test
-          POSTGRES_DB: test
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd "pg_isready -U test"
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
-
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-          cache: 'pip'
-
-      - name: Install Poetry
-        run: |
-          curl -sSL https://install.python-poetry.org | python3 -
-          echo "$HOME/.local/bin" >> $GITHUB_PATH
-
-      - name: Install dependencies
-        run: poetry install --with dev --no-root
-
-      - name: Run integration tests
-        run: poetry run pytest -m integration -v || [ $? -eq 5 ]
-        env:
-          DATABASE_URL: "postgresql://test:test@localhost:5432/test"
-          CREDENTIAL_ENCRYPTION_KEY: "Q1PNlFd4It9oQPtjCcXcmB7wGDkY4w8KwpIRNSF4u7U="
-          KEYCLOAK_SERVER_URL: "http://localhost:8080"
-          KEYCLOAK_REALM: "dhbw"
-          KEYCLOAK_CLIENT_ID: "appstore-backend"
-          KEYCLOAK_CLIENT_SECRET: "test-secret"
-          KEYCLOAK_ENABLED: "false"
-          COVERAGE_FILE: .coverage.integration
-
-      - name: Upload coverage data (integration)
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: coverage-data-integration
-          path: .coverage.integration
-          include-hidden-files: true
-          retention-days: 1
-
-  # ================================================================
-  # 🧪 TEST (api) — end-to-end against running API
-  # ================================================================
-  test-api:
-    name: "🧪 Test (api)"
     runs-on: ubuntu-latest
     needs: [test-unit]
 
@@ -206,24 +165,39 @@ jobs:
       - name: Install dependencies
         run: poetry install --with dev --no-root
 
-      - name: Run API tests
-        run: poetry run pytest -m api -v
+      - name: Run integration tests
+        # ``|| [ $? -eq 5 ]`` swallows pytest's "no tests collected"
+        # exit code (5). With the api marker retired and integration
+        # being our broadest lane this should never trip, but the
+        # guard stays as cheap insurance against a future re-mark.
+        run: poetry run pytest -m integration -v || [ $? -eq 5 ]
         env:
+          # Nur ``DATABASE_URL`` — die Tests fallen über den
+          # Conftest-Fallback automatisch darauf zurück, und es gibt
+          # auf dem Runner sowieso nur diese eine DB. Pflichtfeld in
+          # ``Settings``; ohne wäre der App-Import schon ein
+          # ValidationError.
           DATABASE_URL: "postgresql://test:test@localhost:5432/test"
+          # Required — see test-unit job for the full rationale.
+          # Without this, the FastAPI lifespan spawns a Celery
+          # listener thread on every TestClient(app) enter, stacks
+          # up over hundreds of tests, and either hangs the runner
+          # or OOM-kills it.
+          DISABLE_BACKGROUND_TASKS: "1"
           CREDENTIAL_ENCRYPTION_KEY: "Q1PNlFd4It9oQPtjCcXcmB7wGDkY4w8KwpIRNSF4u7U="
           KEYCLOAK_SERVER_URL: "http://localhost:8080"
           KEYCLOAK_REALM: "dhbw"
           KEYCLOAK_CLIENT_ID: "appstore-backend"
           KEYCLOAK_CLIENT_SECRET: "test-secret"
           KEYCLOAK_ENABLED: "false"
-          COVERAGE_FILE: .coverage.api
+          COVERAGE_FILE: .coverage.integration
 
-      - name: Upload coverage data (api)
+      - name: Upload coverage data (integration)
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: coverage-data-api
-          path: .coverage.api
+          name: coverage-data-integration
+          path: .coverage.integration
           include-hidden-files: true
           retention-days: 1
 
@@ -238,10 +212,9 @@ jobs:
   # ================================================================
   # 📊 COVERAGE — aggregate + publish to GitHub Pages
   # ================================================================
-  # Combines the .coverage data from the unit, integration and api
-  # jobs, renders an HTML report, emits a Shields.io endpoint
-  # badge.json, and (only on main) deploys everything to GitHub
-  # Pages.
+  # Combines the .coverage data from the unit and integration jobs,
+  # renders an HTML report, emits a Shields.io endpoint badge.json,
+  # and (only on main) deploys everything to GitHub Pages.
   #
   # The Pages source for this repo must be set to "GitHub Actions"
   # under Settings → Pages once. Until then, the deploy step fails
@@ -249,7 +222,7 @@ jobs:
   coverage:
     name: "📊 Coverage"
     runs-on: ubuntu-latest
-    needs: [test-unit, test-integration, test-api]
+    needs: [test-unit, test-integration]
     if: ${{ !cancelled() }}
     permissions:
       contents: read
@@ -398,7 +371,7 @@ jobs:
   build:
     name: "🐳 Build"
     runs-on: ubuntu-latest
-    needs: [lint, test-integration, test-api, security]
+    needs: [lint, test-integration, security]
     permissions:
       contents: read
       packages: write

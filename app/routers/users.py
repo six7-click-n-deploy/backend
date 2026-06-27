@@ -85,6 +85,7 @@ def list_users(
 def search_users_keycloak(
     query: str,
     limit: int = 10,
+    db: Session = Depends(get_db),
     current_user: User = Depends(require_staff)
 ):
     """
@@ -106,8 +107,12 @@ def search_users_keycloak(
             detail="Search query must be at least 2 characters"
         )
 
-    from app.database import get_db
-    db = next(get_db())
+    # ``db`` wird per Depends(get_db) injiziert. Vorher öffnete diese
+    # Route die Session manuell über ``next(get_db())`` — das umging
+    # die FastAPI-``dependency_overrides``-Mechanik komplett und ließ
+    # den Router auch im Test gegen die Dev-DB schreiben. Resultat:
+    # Test-Seeds (z.B. ``alice@dhbw.de``) leakten in ``backend_dev``,
+    # und beim nächsten Lauf gab es eine UniqueViolation auf ``email``.
     from app.utils.keycloak_auth import sync_user_from_keycloak
 
     keycloak_users = search_keycloak_users(query, limit)
