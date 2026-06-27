@@ -15,12 +15,11 @@ import uuid
 import pytest
 
 from app.crud import app_version_approvals as crud_approvals
-from app.models import User, UserRole
-from app.main import app as fastapi_app
 from app.database import get_db
+from app.main import app as fastapi_app
+from app.models import User, UserRole
 from app.utils.keycloak_auth import get_current_user_keycloak
-
-from tests.conftest import create_app_in_db, TestingSessionLocal
+from tests.conftest import TestingSessionLocal, create_app_in_db
 
 
 # ----------------------------------------------------------------

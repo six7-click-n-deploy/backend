@@ -22,8 +22,8 @@ from app.models import (
     TaskStatus,
     TaskType,
     Team,
-    UserToTeam,
     UserOpenStackCredential,
+    UserToTeam,
 )
 
 

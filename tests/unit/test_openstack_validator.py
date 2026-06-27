@@ -18,7 +18,6 @@ from app.models import OpenStackAuthType
 from app.schemas import OpenStackCredentialUpsert
 from app.services import openstack_validator
 
-
 pytestmark = pytest.mark.unit
 
 
@@ -26,27 +25,27 @@ pytestmark = pytest.mark.unit
 # Helpers
 # ----------------------------------------------------------------
 def _password_payload(**overrides) -> OpenStackCredentialUpsert:
-    base = dict(
-        auth_type=OpenStackAuthType.PASSWORD,
-        auth_url="https://keystone.example/v3",
-        region_name="RegionOne",
-        identifier="alice",
-        secret="s3cret",
-        project_name="demo",
-        user_domain_name="Default",
-    )
+    base = {
+        "auth_type": OpenStackAuthType.PASSWORD,
+        "auth_url": "https://keystone.example/v3",
+        "region_name": "RegionOne",
+        "identifier": "alice",
+        "secret": "s3cret",
+        "project_name": "demo",
+        "user_domain_name": "Default",
+    }
     base.update(overrides)
     return OpenStackCredentialUpsert(**base)
 
 
 def _appcred_payload(**overrides) -> OpenStackCredentialUpsert:
-    base = dict(
-        auth_type=OpenStackAuthType.APPLICATION_CREDENTIAL,
-        auth_url="https://keystone.example/v3",
-        region_name="RegionOne",
-        identifier="ac-id-123",
-        secret="ac-secret-xyz",
-    )
+    base = {
+        "auth_type": OpenStackAuthType.APPLICATION_CREDENTIAL,
+        "auth_url": "https://keystone.example/v3",
+        "region_name": "RegionOne",
+        "identifier": "ac-id-123",
+        "secret": "ac-secret-xyz",
+    }
     base.update(overrides)
     return OpenStackCredentialUpsert(**base)
 

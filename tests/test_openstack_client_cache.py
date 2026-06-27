@@ -122,9 +122,8 @@ def test_user_connection_uses_credentials_from_envelope(db, mock_user):
     ) as mock_get_creds, patch(
         "app.services.openstack_client.openstack.connect",
         return_value=fake_conn,
-    ) as mock_connect:
-        with user_connection(db, mock_user) as conn:
-            assert conn is fake_conn
+    ) as mock_connect, user_connection(db, mock_user) as conn:
+        assert conn is fake_conn
 
     mock_get_creds.assert_called_once_with(db, mock_user.userId)
     mock_connect.assert_called_once()

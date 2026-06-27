@@ -18,8 +18,8 @@ from app.schemas import (
 from app.utils.capabilities import ensure_edit_course
 from app.utils.keycloak_auth import get_current_user_keycloak
 from app.utils.permissions import (
-    require_staff,
     require_admin,
+    require_staff,
 )
 
 router = APIRouter()

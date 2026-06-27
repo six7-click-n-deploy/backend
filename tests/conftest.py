@@ -61,9 +61,12 @@ from sqlalchemy.orm import sessionmaker
 from app.config import settings
 from app.database import Base, get_db
 from app.main import app
-from app.models import User, UserRole, App  # noqa: F401  (importiert für seitliche Effekte / Metadata-Registrierung)
+from app.models import (  # noqa: F401  (importiert für seitliche Effekte / Metadata-Registrierung)
+    App,
+    User,
+    UserRole,
+)
 from app.utils.keycloak_auth import get_current_user_keycloak
-
 
 # ----------------------------------------------------------------
 # Engine — einmal pro Test-Prozess.

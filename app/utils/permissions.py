@@ -32,7 +32,6 @@ from app.models import (
 )
 from app.utils.keycloak_auth import get_current_user_keycloak as get_current_user
 
-
 # ----------------------------------------------------------------
 # ROLE GROUPINGS
 # ----------------------------------------------------------------

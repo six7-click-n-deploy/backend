@@ -28,7 +28,6 @@ Conventions:
 """
 from __future__ import annotations
 
-from typing import Optional
 from uuid import UUID
 
 from fastapi import HTTPException, status
@@ -39,7 +38,6 @@ from app.models import App, Course, CourseTeacher, Deployment, User, UserRole
 from app.utils.permissions import (
     STAFF_ROLES,
     has_deployment_access,
-    is_deployment_owner_view,
 )
 
 
@@ -63,7 +61,7 @@ def _is_owner(user: User, owner_id) -> bool:
     return str(owner_id) == str(user.userId)
 
 
-def _forbidden(code: str, required: Optional[list[str]] = None) -> HTTPException:
+def _forbidden(code: str, required: list[str] | None = None) -> HTTPException:
     detail: dict = {"code": code}
     if required is not None:
         detail["required"] = required
@@ -73,7 +71,7 @@ def _forbidden(code: str, required: Optional[list[str]] = None) -> HTTPException
 # ================================================================
 # APPS
 # ================================================================
-def can_view_app(user: User, app: App, *, db: Optional[Session] = None) -> bool:
+def can_view_app(user: User, app: App, *, db: Session | None = None) -> bool:
     """Whether ``user`` may see ``app`` at all.
 
     Allowed when:
@@ -101,7 +99,7 @@ def can_view_app(user: User, app: App, *, db: Optional[Session] = None) -> bool:
     return crud_approvals.has_any_approved_version(db, app.appId)
 
 
-def ensure_view_app(user: User, app: App, *, db: Optional[Session] = None) -> None:
+def ensure_view_app(user: User, app: App, *, db: Session | None = None) -> None:
     if not can_view_app(user, app, db=db):
         raise _forbidden("app_view_forbidden")
 

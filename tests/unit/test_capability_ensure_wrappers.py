@@ -32,7 +32,6 @@ from fastapi import HTTPException
 from app.models import UserRole
 from app.utils import capabilities as caps
 
-
 pytestmark = pytest.mark.unit
 
 

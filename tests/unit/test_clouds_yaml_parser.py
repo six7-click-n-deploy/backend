@@ -16,7 +16,6 @@ from app.models import OpenStackAuthType
 from app.schemas import OpenStackCredentialUpsert
 from app.services.clouds_yaml_parser import parse
 
-
 pytestmark = pytest.mark.unit
 
 

@@ -25,7 +25,6 @@ import pytest
 
 from app.services.git_service import GitService
 
-
 pytestmark = pytest.mark.unit
 
 

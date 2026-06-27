@@ -24,7 +24,6 @@ from app.models import Course, CourseTeacher, User, UserRole
 from app.utils.keycloak_auth import get_current_user_keycloak
 from tests.conftest import TestingSessionLocal
 
-
 # ----------------------------------------------------------------
 # LOCAL HELPERS
 # ----------------------------------------------------------------

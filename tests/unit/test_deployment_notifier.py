@@ -259,12 +259,11 @@ def test_resend_user_access_raises_when_outputs_missing():
         patch(
             "app.services.deployment_notifier.email_service.send_email",
             return_value=True,
-        ) as m_send,
+        ) as m_send,pytest.raises(ResendError) as exc_info
     ):
-        with pytest.raises(ResendError) as exc_info:
-            deployment_notifier.resend_user_access(
-                db, deployment.deploymentId, team.teamId, alice.userId,
-            )
+        deployment_notifier.resend_user_access(
+            db, deployment.deploymentId, team.teamId, alice.userId,
+        )
 
     assert str(exc_info.value) == "no_successful_deploy"
     # No mail must have gone out on the failure path.

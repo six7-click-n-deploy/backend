@@ -25,7 +25,6 @@ from app.models import OpenStackAuthType, UserOpenStackCredential
 from app.schemas import OpenStackCredentialUpsert
 from app.utils import crypto
 
-
 # ----------------------------------------------------------------
 # Helpers
 # ----------------------------------------------------------------

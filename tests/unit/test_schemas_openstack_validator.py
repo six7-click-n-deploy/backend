@@ -19,7 +19,6 @@ from pydantic import ValidationError
 from app.models import OpenStackAuthType
 from app.schemas import OpenStackCredentialUpsert
 
-
 pytestmark = pytest.mark.unit
 
 

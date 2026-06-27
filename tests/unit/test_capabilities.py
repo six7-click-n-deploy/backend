@@ -22,7 +22,6 @@ from fastapi import HTTPException
 from app.models import UserRole
 from app.utils import capabilities as caps
 
-
 pytestmark = pytest.mark.unit
 
 
@@ -92,7 +91,7 @@ class TestCanViewApp:
         app = _app(uuid.uuid4(), is_private=False)
         monkeypatch.setattr(
             "app.utils.capabilities.crud_approvals.has_any_approved_version",
-            lambda db, app_id: True,
+            lambda _db, _app_id: True,
         )
         db = MagicMock()
         assert caps.can_view_app(teacher, app, db=db) is True
@@ -105,7 +104,7 @@ class TestCanViewApp:
         app = _app(uuid.uuid4(), is_private=False)
         monkeypatch.setattr(
             "app.utils.capabilities.crud_approvals.has_any_approved_version",
-            lambda db, app_id: True,
+            lambda _db, _app_id: True,
         )
         db = MagicMock()
         assert caps.can_view_app(student, app, db=db) is True
@@ -114,7 +113,7 @@ class TestCanViewApp:
         app = _app(uuid.uuid4(), is_private=False)
         monkeypatch.setattr(
             "app.utils.capabilities.crud_approvals.has_any_approved_version",
-            lambda db, app_id: False,
+            lambda _db, _app_id: False,
         )
         db = MagicMock()
         assert caps.can_view_app(student, app, db=db) is False

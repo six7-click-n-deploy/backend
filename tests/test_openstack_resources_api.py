@@ -13,14 +13,12 @@ OpenStack wird wie in ``test_deployment_resources_endpoint.py`` über
 """
 from __future__ import annotations
 
-import uuid
 from contextlib import contextmanager
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 from app.services import openstack_client
-
 
 PREFIX = "/me/openstack/resources"
 
