@@ -8,7 +8,7 @@ from app.database import get_db
 from app.models import User
 from app.schemas import TeamCreate, TeamResponse, TeamUpdate, TeamWithMembers
 from app.utils.keycloak_auth import get_current_user_keycloak
-from app.utils.permissions import get_current_teacher_or_admin
+from app.utils.permissions import require_staff
 
 router = APIRouter()
 
@@ -58,7 +58,7 @@ def get_team(
 def create_team(
     team: TeamCreate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_teacher_or_admin)
+    current_user: User = Depends(require_staff)
 ):
     """
     Create a new team
@@ -75,7 +75,7 @@ def update_team(
     team_id: UUID,
     team_update: TeamUpdate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_teacher_or_admin)
+    current_user: User = Depends(require_staff)
 ):
     """
     Update a team
@@ -97,7 +97,7 @@ def update_team(
 def delete_team(
     team_id: UUID,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_teacher_or_admin)
+    current_user: User = Depends(require_staff)
 ):
     """
     Delete a team
@@ -120,7 +120,7 @@ def add_user_to_team(
     team_id: UUID,
     user_id: UUID,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_teacher_or_admin)
+    current_user: User = Depends(require_staff)
 ):
     """
     Add a user to a team
@@ -143,7 +143,7 @@ def remove_user_from_team(
     team_id: UUID,
     user_id: UUID,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_teacher_or_admin)
+    current_user: User = Depends(require_staff)
 ):
     """
     Remove a user from a team

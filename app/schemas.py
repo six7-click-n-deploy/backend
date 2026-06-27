@@ -21,8 +21,10 @@ class UserCreate(UserBase):
 
 
 class UserUpdate(BaseModel):
-    email: EmailStr | None = None
-    username: str | None = None
+    # Phase 2 — Profile-Edit (firstName/lastName/email/username) ist
+    # nicht mehr Teil dieser App. Self-Service läuft ausschließlich
+    # über Keycloak. Der einzige verbleibende Update-Pfad ist
+    # ``role`` und ist Admin-only (siehe ``PUT /users/{id}``).
     role: UserRole | None = None
     courseId: UUID | None = None
 

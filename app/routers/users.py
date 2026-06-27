@@ -9,15 +9,14 @@ from app.crud import users as crud_users
 from app.database import get_db
 from app.models import User, UserRole
 from app.schemas import UserResponse, UserStatistics, UserUpdate, UserWithCourse
+from app.utils.capabilities import ensure_change_user_role, ensure_view_user
 from app.utils.keycloak_auth import (
     get_current_user_keycloak,
     get_keycloak_users_by_ids,
     search_keycloak_users,
 )
 from app.utils.permissions import (
-    ensure_resource_access,
-    get_current_admin,
-    get_current_teacher_or_admin,
+    require_staff,
 )
 
 router = APIRouter()
@@ -40,7 +39,7 @@ def list_users(
     role: UserRole | None = None,
     course_id: UUID | None = None,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_teacher_or_admin)
+    current_user: User = Depends(require_staff)
 ):
     """
     Get all users with optional filters
@@ -86,7 +85,7 @@ def list_users(
 def search_users_keycloak(
     query: str,
     limit: int = 10,
-    current_user: User = Depends(get_current_teacher_or_admin)
+    current_user: User = Depends(require_staff)
 ):
     """
     Search users directly from Keycloak by username, email, or name
@@ -180,7 +179,7 @@ def get_user_statistics(
         )
 
     # Check access permission
-    ensure_resource_access(user_id, current_user)
+    ensure_view_user(current_user, user_id)
 
     # Get statistics
     apps = crud_apps.get_apps(db, user_id=user_id, limit=1000)
@@ -195,7 +194,7 @@ def get_user_statistics(
     )
 
 # ----------------------------------------------------------------
-# UPDATE USER
+# UPDATE USER (ROLE ONLY — ADMIN)
 # ----------------------------------------------------------------
 @router.put("/{user_id}", response_model=UserResponse)
 def update_user(
@@ -204,10 +203,21 @@ def update_user(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user_keycloak)
 ):
-    """
-    Update user information
-    - **Students**: Can only update their own profile (no role change)
-    - **Teachers/Admins**: Can update any profile
+    """Update a user record.
+
+    Phase 2 scope cut: Profile-Edit (firstName/lastName/email/username)
+    läuft jetzt ausschließlich über Keycloak — die App hat dafür keinen
+    Endpoint mehr. ``UserUpdate`` trägt nur noch ``role`` und
+    ``courseId``.
+
+    Bug #1 — Role-Change ist Admin-only. Wenn der Request-Body ``role``
+    enthält UND der Caller nicht Admin ist, antworten wir mit 403 und
+    der strukturierten Payload ``{code: "role_required",
+    required: ["admin"]}`` aus :func:`ensure_change_user_role`.
+
+    Sonstige Aktualisierungen (``courseId``) sind ebenfalls Admin-only,
+    weil sie das Datenmodell des Users serverseitig ändern — der User
+    selbst sieht das Feld in Keycloak gar nicht.
     """
     user = crud_users.get_user(db, user_id)
     if not user:
@@ -216,18 +226,19 @@ def update_user(
             detail="User not found"
         )
 
-    # Students can only update their own profile
-    if current_user.role == UserRole.STUDENT and user_id != current_user.userId:
+    # Bug #1 — jede Änderung an einer Nicht-Profile-Spalte (heute:
+    # role, courseId) ist Admin-only. Der Caller muss Admin sein,
+    # bevor wir die Mutation durchführen.
+    payload = user_update.model_dump(exclude_unset=True)
+    if "role" in payload:
+        ensure_change_user_role(current_user)
+    if "courseId" in payload and current_user.role != UserRole.ADMIN:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="You can only update your own profile"
-        )
-
-    # Students cannot change their role
-    if current_user.role == UserRole.STUDENT and user_update.role:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="You cannot change your role"
+            detail={
+                "code": "role_required",
+                "required": [UserRole.ADMIN.value],
+            },
         )
 
     updated_user = crud_users.update_user(db, user_id, user_update)
@@ -235,22 +246,11 @@ def update_user(
 
 
 # ----------------------------------------------------------------
-# DELETE USER (ADMIN ONLY)
+# DELETE USER — entfernt
 # ----------------------------------------------------------------
-@router.delete("/{user_id}", status_code=status.HTTP_204_NO_CONTENT)
-def delete_user(
-    user_id: UUID,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_admin)
-):
-    """
-    Delete a user
-    - **Requires**: ADMIN role
-    """
-    success = crud_users.delete_user(db, user_id)
-    if not success:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="User not found"
-        )
-    return None
+# Phase 2 scope cut: User-Delete läuft jetzt ausschließlich über
+# Keycloak. Die App selbst entfernt keine User mehr — historische
+# Daten (Apps, Deployments, Tasks) blieben sonst mit dangling
+# user_ids zurück, und der Operator hatte zwei konkurrierende
+# Quellen-of-Truth zu pflegen. Endpoint wurde entfernt; Keycloak ist
+# die einzige Stelle, an der ein User gelöscht wird.

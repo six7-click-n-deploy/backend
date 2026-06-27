@@ -16,6 +16,7 @@ from app.models import (
     UserToDeployment,
     UserToTeam,
 )
+from app.utils.capabilities import get_my_course_teacher_ids
 from app.utils.keycloak_auth import get_current_user_keycloak
 
 router = APIRouter()
@@ -25,6 +26,14 @@ class DashboardStatsResponse(BaseModel):
     deployments: int
     apps: int
     courses: int
+    # Phase 3 — course-teacher scope counter. Counts deployments
+    # whose owner sits inside one of the requestor's taught courses.
+    # 0 for students (who can't be course-teachers), 0 for teachers
+    # without any ``course_teachers`` row, and (rare) 0 for admins
+    # who aren't explicitly registered as a course-teacher anywhere.
+    # The field is always present so the frontend can render the
+    # "Kurs-Scope" tile without a separate request.
+    courseScopeDeployments: int = 0
 
 
 @router.get("/stats", response_model=DashboardStatsResponse)
@@ -50,14 +59,14 @@ def get_dashboard_stats(
     Apps counter MUST mirror the role-branched visibility of
     ``GET /apps`` (see ``routers/apps.py``):
 
-      * Teacher/Admin: every non-deleted app — exactly what
+      * Admin: every non-deleted app — exactly what
         ``crud_apps.get_apps`` returns when called without
-        ``user_id``. Staff sees the whole catalog including public-
-        unapproved and private third-party apps; the KPI must too.
-      * Student/regular: own apps (regardless of ``is_private`` /
+        ``user_id``. Admin keeps the plattform-wide view.
+      * Teacher/Student: own apps (regardless of ``is_private`` /
         approval state) OR public apps (``is_private = False``)
         with at least one APPROVED version — mirrors
-        ``crud_apps.get_visible_apps``.
+        ``crud_apps.get_visible_apps``. Bug #6 fix: Teacher gets the
+        student-style filter; the staff-blanket-view is gone.
 
     Soft-deleted rows (``deleted_at IS NOT NULL``) are excluded on both
     counters — same as the list endpoints.
@@ -94,10 +103,11 @@ def get_dashboard_stats(
     deployments_total = deployments_q.scalar() or 0
 
     # Apps visible to the user — role-branched, same gate as the
-    # ``/apps`` endpoint at ``routers/apps.py``. Teacher/Admin see
-    # everything non-deleted (mirrors ``crud_apps.get_apps``); students
-    # see own + public-approved (mirrors ``crud_apps.get_visible_apps``).
-    if current_user.role in (UserRole.TEACHER, UserRole.ADMIN):
+    # ``/apps`` endpoint at ``routers/apps.py``. Admin sees everything
+    # non-deleted (mirrors ``crud_apps.get_apps``); everyone else
+    # (incl. Teacher, per Phase 2 Bug #6) sees own + public-approved
+    # (mirrors ``crud_apps.get_visible_apps``).
+    if current_user.role == UserRole.ADMIN:
         apps_total = (
             db.query(func.count(App.appId))
             .filter(App.deleted_at.is_(None))
@@ -125,8 +135,25 @@ def get_dashboard_stats(
 
     courses_total = db.query(func.count(Course.courseId)).scalar() or 0
 
+    # Phase 3 — course-teacher scope counter. Loaded once via the
+    # capability helper so this stays a single small lookup. The
+    # join below counts deployments whose owner sits in one of the
+    # requestor's taught courses; soft-deleted deployments are
+    # excluded the same way as the primary counter.
+    course_scope_deployments = 0
+    my_course_ids = get_my_course_teacher_ids(current_user, db)
+    if my_course_ids:
+        course_scope_deployments = (
+            db.query(func.count(Deployment.deploymentId))
+            .join(User, User.userId == Deployment.userId)
+            .filter(Deployment.deleted_at.is_(None))
+            .filter(User.courseId.in_(my_course_ids))
+            .scalar()
+        ) or 0
+
     return DashboardStatsResponse(
         deployments=deployments_total,
         apps=apps_total,
         courses=courses_total,
+        courseScopeDeployments=course_scope_deployments,
     )
