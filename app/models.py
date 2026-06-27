@@ -374,6 +374,7 @@ class AppVersionApproval(Base):
         default=AppVersionApprovalStatus.PENDING,
     )
     diff_url = Column(String, nullable=True)
+    notes = Column(Text, nullable=True)
     rejection_reason = Column(Text, nullable=True)
     reviewed_by = Column(
         UUID(as_uuid=True),

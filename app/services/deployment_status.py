@@ -28,9 +28,8 @@ from __future__ import annotations
 
 import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from contextlib import contextmanager
 from dataclasses import dataclass, field
-from typing import Any, Iterator, Literal
+from typing import Any, Literal
 
 from sqlalchemy.orm import Session
 
@@ -493,10 +492,7 @@ def _hardware_from(server: Any) -> HardwareSpec:
             "disk": getattr(flavor, "disk", None),
         }
     image = getattr(server, "image", None) or {}
-    if isinstance(image, dict):
-        image_id = image.get("id")
-    else:
-        image_id = getattr(image, "id", None)
+    image_id = image.get("id") if isinstance(image, dict) else getattr(image, "id", None)
 
     return HardwareSpec(
         flavor_name=flavor.get("original_name") or flavor.get("name"),
