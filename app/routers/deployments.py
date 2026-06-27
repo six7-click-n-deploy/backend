@@ -244,6 +244,17 @@ def get_deployment(
         except json.JSONDecodeError:
             user_input_var_parsed = None
 
+    # ``deployment.app`` is the raw ORM relation whose ``image`` column
+    # carries bytes. Pydantic's ``DeploymentDetail`` declares
+    # ``app.image: Optional[str]`` (the wire shape is a ``data:image/...``
+    # URL), so handing it the bytes verbatim throws ``string_unicode``.
+    # Run it through ``_serialize_app`` — the same helper the
+    # ``/apps``-endpoints already use — to swap the bytes for the
+    # data-URL string in place. Apps without an uploaded image are
+    # unaffected (``getattr`` returns ``None`` and the helper no-ops).
+    from app.routers.apps import _serialize_app  # local: avoid import cycle
+    serialised_app = _serialize_app(deployment.app)
+
     return DeploymentDetail(
         deploymentId=deployment.deploymentId,
         name=deployment.name,
@@ -254,7 +265,7 @@ def get_deployment(
         status=status_value,
         created_at=created_at,
         user=deployment.user,
-        app=deployment.app,
+        app=serialised_app,
         teams=teams,
         latest_task=task_summary,
         outputs=outputs,
