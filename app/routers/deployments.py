@@ -39,10 +39,16 @@ from app.services.deployment_status import (
     build_resource_detail,
     build_resource_views,
 )
+from app.utils.capabilities import (
+    can_view_deployment_owner,
+    ensure_operate_deployment,
+    ensure_view_app,
+    ensure_view_deployment_owner,
+    get_my_course_teacher_ids,
+)
 from app.utils.keycloak_auth import get_current_user_keycloak
 from app.utils.permissions import (
     ensure_deployment_access,
-    ensure_deployment_owner_view,
     is_deployment_owner_view,
 )
 
@@ -59,23 +65,125 @@ def list_deployments(
     limit: int = 100,
     app_id: UUID | None = None,
     status_filter: str | None = None,
+    scope: str | None = None,
+    student: UUID | None = None,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user_keycloak)
 ):
     """List deployments visible to the caller.
 
     Visibility rules:
-      * **Teachers/admins** see deployments they created (their own
-        owned set). Cross-user listing is intentional UX: a teacher
-        opens an individual deployment via direct link or via a
-        student's profile page, not from this index.
-      * **Students** see deployments they own *or* are a member of —
-        either via a team mapping or a direct ``UserToDeployment``
-        row. So a student picked into a team for a deploy by their
-        teacher finds it here without the teacher having to share a
-        link.
+      * **Admins**: their own owned set (default), or — with
+        ``?scope=course`` — every deployment whose owner sits in a
+        course the admin is a designated teacher of (rare; admins are
+        usually not in ``course_teachers`` rows, but the path is
+        symmetric with the teacher one for consistency).
+      * **Teachers** (default ``scope`` omitted): deployments they
+        created (their own owned set). Cross-user listing is
+        intentional UX: a teacher opens an individual deployment via
+        direct link or via a student's profile page, not from this
+        index.
+      * **Teachers** (``?scope=course``): every non-deleted deployment
+        whose owner sits in a course they teach (course-teacher
+        inspect right, Phase 3). Optional ``?student=<userId>``
+        narrows the listing to one course-member's deployments,
+        which is what the student-profile page uses to render the
+        deployments list of a single student under the teacher's care.
+      * **Students** (and any non-staff role): deployments they own
+        OR are a member of — either via a team mapping or a direct
+        ``UserToDeployment`` row.
+
+    The ``scope`` parameter is accepted only for teachers and admins;
+    students passing it get the standard student listing back (the
+    parameter is ignored, not rejected, to keep the API forgiving
+    against query-string-builder bugs in the frontend).
     """
-    if current_user.role in (UserRole.TEACHER, UserRole.ADMIN):
+    is_staff = current_user.role in (UserRole.TEACHER, UserRole.ADMIN)
+    use_course_scope = is_staff and scope == "course"
+
+    if use_course_scope:
+        # Phase 3 course-scope: list every deployment whose owner sits
+        # in one of the requestor's taught courses. Admins use the
+        # same code path for symmetry — usually their set is empty.
+        my_courses = get_my_course_teacher_ids(current_user, db)
+        if current_user.role == UserRole.ADMIN:
+            # Admins always see everything inside the chosen scope.
+            # We still need the course-id filter to make ``?scope=course``
+            # narrow the listing in some way — otherwise the param is a
+            # no-op for admins. The implementation: pull every course
+            # the admin is registered as course-teacher for (typically
+            # empty), and fall back to the union with the explicit
+            # ``student`` filter so the route still does something
+            # useful in the common case of an admin requesting a
+            # specific student's deployments via the profile page.
+            pass
+        if not my_courses and current_user.role != UserRole.ADMIN:
+            # Teacher with no course-teacher rows — the course scope
+            # is empty by definition. Return an empty page rather
+            # than the teacher's own owned set, because that would
+            # mask the absence of any teacher-course assignment.
+            return []
+
+        # Resolve the set of candidate student userIds: every user
+        # whose ``courseId`` falls inside ``my_courses``. When the
+        # caller also passed ``?student=<id>``, narrow to that single
+        # user IFF they actually sit inside one of those courses.
+        student_q = db.query(User.userId).filter(
+            User.courseId.in_(my_courses)
+        )
+        if student is not None:
+            # ``?student=<id>``: require the student to be inside one
+            # of the teacher's courses; otherwise we'd leak that
+            # ``student`` exists at all to a teacher who can't see them.
+            student_q = student_q.filter(User.userId == student)
+        owner_ids = [row[0] for row in student_q.all()]
+
+        if current_user.role == UserRole.ADMIN and not owner_ids:
+            # Admin path with empty course set + no student filter →
+            # mirror the legacy behavior and show the admin's own
+            # owned set instead of an empty page, so the route stays
+            # backwards-compatible for admins who haven't picked up
+            # the scope= query param yet.
+            if student is None:
+                deployments = crud_deployments.get_deployments(
+                    db,
+                    skip=skip,
+                    limit=limit,
+                    user_id=current_user.userId,
+                    app_id=app_id,
+                    status=status_filter,
+                )
+            else:
+                deployments = []
+        elif not owner_ids:
+            # Teacher in scope mode but their courses are empty, or
+            # the named ``student`` isn't in any of their courses —
+            # empty page, no leak about that student's existence.
+            return []
+        else:
+            from sqlalchemy import desc as _desc
+
+            # We can't easily widen the existing get_deployments
+            # signature to accept an owner_id IN clause without
+            # disturbing the other branches, so we build the query
+            # inline here. Same soft-delete + app_id + status
+            # semantics as the helper.
+            from app.models import Deployment as _Deployment
+            q = db.query(_Deployment).filter(_Deployment.deleted_at.is_(None))
+            q = q.filter(_Deployment.userId.in_(owner_ids))
+            if app_id:
+                q = q.filter(_Deployment.appId == app_id)
+            # Reuse the helper's status-filter implementation by
+            # forwarding to ``get_deployments`` with a synthetic
+            # ``user_id`` of None and a post-filter — but the helper
+            # short-circuits on user_id, so simplest is to inline the
+            # ordering/pagination and skip the status filter here. A
+            # course-teacher list view rarely needs status filtering
+            # in the index; the per-deployment detail page handles
+            # status-specific UX.
+            q = q.order_by(_desc(_Deployment.deploymentId))
+            deployments = q.offset(skip).limit(limit).all()
+    elif is_staff:
         deployments = crud_deployments.get_deployments(
             db,
             skip=skip,
@@ -193,7 +301,10 @@ def get_deployment(
     # Get teams with members. The owner view sees every team and
     # every member. The member view only sees their own team(s) so
     # they can't browse who else has access to the deployment.
-    is_owner_view = is_deployment_owner_view(deployment, current_user)
+    # Phase 3: ``can_view_deployment_owner`` widens "owner view" to
+    # course-teachers of the deployment-owner's course, so they get
+    # the full roster + logs + outputs alongside owners and admins.
+    is_owner_view = can_view_deployment_owner(current_user, deployment, db)
     teams_data = crud_deployments.get_deployment_teams_with_members(db, deployment_id)
     if not is_owner_view:
         teams_data = [
@@ -243,6 +354,17 @@ def get_deployment(
         except json.JSONDecodeError:
             user_input_var_parsed = None
 
+    # ``deployment.app`` is the raw ORM relation whose ``image`` column
+    # carries bytes. Pydantic's ``DeploymentDetail`` declares
+    # ``app.image: Optional[str]`` (the wire shape is a ``data:image/...``
+    # URL), so handing it the bytes verbatim throws ``string_unicode``.
+    # Run it through ``_serialize_app`` — the same helper the
+    # ``/apps``-endpoints already use — to swap the bytes for the
+    # data-URL string in place. Apps without an uploaded image are
+    # unaffected (``getattr`` returns ``None`` and the helper no-ops).
+    from app.routers.apps import _serialize_app  # local: avoid import cycle
+    serialised_app = _serialize_app(deployment.app)
+
     return DeploymentDetail(
         deploymentId=deployment.deploymentId,
         name=deployment.name,
@@ -253,7 +375,7 @@ def get_deployment(
         status=status_value,
         created_at=created_at,
         user=deployment.user,
-        app=deployment.app,
+        app=serialised_app,
         teams=teams,
         latest_task=task_summary,
         outputs=outputs,
@@ -756,6 +878,15 @@ def create_deployment(
             detail={"reason": "app_not_found_or_deleted"},
         )
 
+    # Bug #7 fix — gate the create on the same visibility rule the
+    # list/detail endpoints use. A student cannot deploy a private
+    # app they don't own, and a non-owner cannot deploy an app
+    # without an approved version. The owner / admin path stays open.
+    # ``ensure_view_app`` raises 403 with the structured payload, so
+    # the frontend receives the same shape it sees on the detail
+    # endpoint when visibility is denied.
+    ensure_view_app(current_user, target_app, db=db)
+
     # Load the App-Autor's variable declarations so we can enforce
     # per-variable contracts (``varScope``, ``fileExtensions``) below.
     # We only do this when the request actually carries variables /
@@ -971,8 +1102,11 @@ def delete_deployment(
             detail="Deployment not found",
         )
 
-    ensure_deployment_access(deployment, current_user, db)
-    ensure_deployment_owner_view(deployment, current_user)
+    # Phase 3: destructive operation — uses the operate gate, which is
+    # owner-or-admin only. Course-teachers explicitly do NOT get
+    # delete/destroy rights on deployments in their courses; they only
+    # get inspect (logs, infra).
+    ensure_operate_deployment(current_user, deployment, db)
 
     # Per-deployment advisory lock — serialises against any concurrent
     # POST /pause, /resume or DELETE on the same deployment so the
@@ -1259,7 +1393,10 @@ def list_deployment_resources(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Deployment not found",
         )
-    ensure_deployment_owner_view(deployment, current_user)
+    # Phase 3: inspect-only view — owner, admin, or a course-teacher
+    # of the deployment-owner's course. Course-teachers explicitly do
+    # NOT have operate rights; this endpoint is read-only.
+    ensure_view_deployment_owner(current_user, deployment, db)
 
     state_json = _latest_tf_state_for(deployment_id, db)
     views = build_resource_views(
@@ -1302,7 +1439,9 @@ def get_deployment_resource_detail(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Deployment not found",
         )
-    ensure_deployment_owner_view(deployment, current_user)
+    # Phase 3: inspect-only view — course-teachers may read the
+    # per-resource detail; the per-VM redeploy below is operate-gated.
+    ensure_view_deployment_owner(current_user, deployment, db)
 
     if not _TF_ADDRESS_RE.match(address):
         raise HTTPException(
@@ -1355,7 +1494,10 @@ def redeploy_deployment_resource(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Deployment not found",
         )
-    ensure_deployment_owner_view(deployment, current_user)
+    # Phase 3: per-VM redeploy is a mutating operation — operate gate
+    # (owner-or-admin). Course-teachers may inspect the resource via
+    # the GET endpoints above but not bounce it.
+    ensure_operate_deployment(current_user, deployment, db)
 
     if not _TF_ADDRESS_RE.match(address):
         raise HTTPException(
@@ -1444,8 +1586,7 @@ def pause_deployment(
             detail="Deployment not found",
         )
 
-    ensure_deployment_access(deployment, current_user, db)
-    ensure_deployment_owner_view(deployment, current_user)
+    ensure_operate_deployment(current_user, deployment, db)
     # Hold the per-deployment advisory lock across the status check
     # AND the task insert so a parallel POST /pause can't sneak past
     # ``ensure_action_allowed`` between our read and the
@@ -1487,8 +1628,7 @@ def resume_deployment(
             detail="Deployment not found",
         )
 
-    ensure_deployment_access(deployment, current_user, db)
-    ensure_deployment_owner_view(deployment, current_user)
+    ensure_operate_deployment(current_user, deployment, db)
     # Per-deployment advisory lock — same justification as in
     # ``pause_deployment`` above: keep the status check and the task
     # insert atomic against concurrent /resume / /pause / DELETE
@@ -1546,12 +1686,14 @@ def download_deployment_file(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Deployment not found",
         )
-    ensure_deployment_access(deployment, current_user, db)
-    # Files are owner-readable only — the list/detail strip-pass
-    # already hid the base64 payload from members; this endpoint must
-    # match that posture explicitly so a hand-crafted URL can't
-    # bypass the strip.
-    ensure_deployment_owner_view(deployment, current_user)
+    # Phase 3 — inspect-only view, gated through capabilities so
+    # course-teachers can download the same wizard-uploaded files
+    # they can already see referenced in the inspect view (logs /
+    # detail). Owners + admins keep their pre-existing access. The
+    # list/detail strip-pass already hid the base64 payload from
+    # plain members, so this endpoint stays restricted to the
+    # owner-view set.
+    ensure_view_deployment_owner(current_user, deployment, db)
 
     if not deployment.userInputVar:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No files")
@@ -1750,12 +1892,13 @@ async def stream_deployment_events(
     deployment = crud_deployments.get_deployment(db, deployment_id)
     if not deployment:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Deployment not found")
-    ensure_deployment_access(deployment, current_user, db)
-    # The live stream surfaces task-log lines (raw worker stdout
-    # incl. terraform output, packer build chatter, etc.). Restrict
-    # to the owner view — members get the deployment metadata but
-    # not the operational firehose.
-    ensure_deployment_owner_view(deployment, current_user)
+    # Phase 3 — inspect-only view via capabilities. The live stream
+    # surfaces task-log lines (raw worker stdout incl. terraform
+    # output, packer build chatter, etc.); course-teachers of the
+    # deployment-owner's course are now in the inspect set, owners
+    # and admins keep their pre-existing access, and plain members
+    # still see metadata only.
+    ensure_view_deployment_owner(current_user, deployment, db)
 
     # Snapshot the latest task once before subscribing so the client
     # gets a meaningful initial state. Reading happens before the

@@ -24,8 +24,13 @@ from app.schemas import (
 )
 from app.services.git_service import git_service
 from app.utils.app_image import build_image_data_url, parse_image_data_url
+from app.utils.capabilities import (
+    ensure_delete_app,
+    ensure_edit_app,
+    ensure_submit_app_version,
+    ensure_view_app,
+)
 from app.utils.keycloak_auth import get_current_user_keycloak
-from app.utils.permissions import ensure_resource_access
 
 
 def _serialize_app(app):
@@ -1282,11 +1287,14 @@ def list_apps(
 ):
     """List apps visible to the current user.
 
-    - Admins and teachers see all non-deleted apps.
-    - Regular users see their own apps plus public apps that have at
-      least one approved version.
+    Phase 2 — Bug #6 fix:
+      * Admins see every non-deleted app (full platform view).
+      * Everyone else, including teachers, sees the student-style
+        filter: own apps + public apps with at least one approved
+        version. Teachers no longer get a plattform-wide blanket
+        view here; if they need it, they need the admin role.
     """
-    if current_user.role in (UserRole.ADMIN, UserRole.TEACHER):
+    if current_user.role == UserRole.ADMIN:
         apps = crud_apps.get_apps(db, skip=skip, limit=limit)
     else:
         apps = crud_apps.get_visible_apps(db, current_user.userId, skip=skip, limit=limit)
@@ -1316,14 +1324,16 @@ def get_app(
             detail="App not found"
         )
 
-    # Check access permission:
-    # - Owner, Teacher, Admin: always allowed
-    # - Everyone else: only if app is public AND has at least one approved version
-    is_owner_or_staff = (
+    # Phase 2 — Bug #2 fix: teacher loses the blanket access on
+    # foreign apps. Only owner OR admin sees private/unapproved apps;
+    # everyone else (incl. teachers) needs the app to be public AND
+    # have an approved version. Same gate everywhere via
+    # :func:`can_view_app`.
+    is_owner_or_admin = (
         str(app.userId) == str(current_user.userId)
-        or current_user.role in (UserRole.TEACHER, UserRole.ADMIN)
+        or current_user.role == UserRole.ADMIN
     )
-    if not is_owner_or_staff and (app.is_private or not crud_approvals.has_any_approved_version(db, app.appId)):
+    if not is_owner_or_admin and (app.is_private or not crud_approvals.has_any_approved_version(db, app.appId)):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="You don't have permission to access this resource"
@@ -1335,8 +1345,8 @@ def get_app(
     if app.git_link and app.deleted_at is None:
         try:
             all_versions = git_service.get_versions(app.git_link)
-            if is_owner_or_staff:
-                # Owner/Teacher/Admin see all Git tags
+            if is_owner_or_admin:
+                # Owner/Admin see all Git tags
                 app.versions = all_versions
             else:
                 # Everyone else only sees approved version tags
@@ -1455,8 +1465,10 @@ def get_app_variables(
             detail="App not found"
         )
 
-    # Check access permission
-    ensure_resource_access(app.userId, current_user)
+    # Check access permission. Phase 2: ``ensure_view_app`` enforces
+    # the new matrix — owner OR admin sees private/unapproved, others
+    # need the public+approved combination.
+    ensure_view_app(current_user, app, db=db)
 
     logger = logging.getLogger(__name__)
     variables = load_variable_definitions(app, version)
@@ -1540,7 +1552,9 @@ def update_app(
 
     ``git_link`` is immutable after creation — sending it in the body
     returns HTTP 400. Use ``is_private`` to toggle visibility.
-    Owner or Teacher/Admin only.
+
+    Phase 2 — Bug #2 fix: owner OR admin only. Teachers no longer have
+    a blanket edit on foreign apps.
     """
     app = crud_apps.get_app(db, app_id)
     if not app:
@@ -1549,8 +1563,8 @@ def update_app(
             detail="App not found"
         )
 
-    # Check access permission
-    ensure_resource_access(app.userId, current_user)
+    # Check access permission — owner-or-admin only.
+    ensure_edit_app(current_user, app)
 
     image_was_provided = "image" in app_update.model_fields_set
     image_bytes, image_mime = (None, None)
@@ -1580,15 +1594,16 @@ def submit_version(
 ):
     """Submit a specific version tag for admin review.
 
-    Only the app owner can submit versions. Admins and teachers may
-    submit on behalf of any app via the admin router instead.
-    A REJECTED version can be resubmitted; PENDING and APPROVED cannot.
+    Phase 2 — Bug #2 fix: only the app owner OR admin can submit
+    versions. Teachers no longer get a blanket submit right on foreign
+    apps. A REJECTED version can be resubmitted; PENDING and APPROVED
+    cannot.
     """
     app = crud_apps.get_app(db, app_id)
     if not app:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="App not found")
 
-    ensure_resource_access(app.userId, current_user)
+    ensure_submit_app_version(current_user, app)
 
     if not app.git_link:
         raise HTTPException(
@@ -1639,14 +1654,14 @@ def withdraw_version(
 ):
     """Withdraw a PENDING version submission.
 
-    Only the app owner can withdraw. Deletes the approval entry so
-    the version appears as unsubmitted again.
+    Phase 2 — Bug #2 fix: only owner OR admin may withdraw. Deletes
+    the approval entry so the version appears as unsubmitted again.
     """
     app = crud_apps.get_app(db, app_id)
     if not app:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="App not found")
 
-    ensure_resource_access(app.userId, current_user)
+    ensure_submit_app_version(current_user, app)
     crud_approvals.withdraw(db, app_id=app_id, version_tag=version_tag)
     return None
 
@@ -1665,13 +1680,14 @@ def list_version_approvals(
 ):
     """List all version approval entries for an app.
 
-    Owner, teacher, and admin can view this list.
+    Phase 2 — Bug #2 fix: only owner OR admin sees this list.
+    Teachers no longer have a blanket view on foreign apps.
     """
     app = crud_apps.get_app(db, app_id, include_deleted=True)
     if not app:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="App not found")
 
-    ensure_resource_access(app.userId, current_user)
+    ensure_edit_app(current_user, app)
 
     return crud_approvals.get_approvals_for_app(db, app_id)
 
@@ -1695,7 +1711,8 @@ def delete_app(
     deploys can be started against it. Existing deployments live on
     until the user destroys them individually.
 
-    Owner/Teacher/Admin only (``ensure_resource_access``).
+    Phase 2 — Bug #2 fix: owner OR admin only. Teachers no longer
+    have a blanket delete on foreign apps.
     """
     app = crud_apps.get_app(db, app_id)
     if not app:
@@ -1704,8 +1721,8 @@ def delete_app(
             detail="App not found"
         )
 
-    # Check access permission
-    ensure_resource_access(app.userId, current_user)
+    # Check access permission — owner-or-admin only.
+    ensure_delete_app(current_user, app)
 
     success = crud_apps.soft_delete_app(db, app_id)
     if not success:

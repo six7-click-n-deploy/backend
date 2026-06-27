@@ -67,7 +67,7 @@ def patched_celery():
         yield m
 
 
-@pytest.mark.api
+@pytest.mark.integration
 def test_post_deployment_persists_files_under_terraform(
     client, db, mock_user, patched_celery
 ):
@@ -122,7 +122,7 @@ def test_post_deployment_persists_files_under_terraform(
     assert user_vars_arg["terraform"]["task_pdf"]["all"]["content_b64"] == _b64(pdf)
 
 
-@pytest.mark.api
+@pytest.mark.integration
 def test_post_deployment_413_when_single_file_too_large(
     client, db, mock_user, patched_celery
 ):
@@ -159,7 +159,7 @@ def test_post_deployment_413_when_single_file_too_large(
     )
 
 
-@pytest.mark.api
+@pytest.mark.integration
 def test_post_deployment_422_on_invalid_base64(
     client, db, mock_user, patched_celery
 ):
@@ -188,7 +188,7 @@ def test_post_deployment_422_on_invalid_base64(
     patched_celery.assert_not_called()
 
 
-@pytest.mark.api
+@pytest.mark.integration
 def test_detail_endpoint_strips_file_bytes(
     client, db, mock_user, patched_celery
 ):
@@ -222,7 +222,7 @@ def test_detail_endpoint_strips_file_bytes(
     assert "content_b64" not in upload
 
 
-@pytest.mark.api
+@pytest.mark.integration
 def test_download_endpoint_returns_owner_bytes(
     client, db, mock_user, patched_celery
 ):
@@ -257,7 +257,7 @@ def test_download_endpoint_returns_owner_bytes(
     assert "hello.txt" in response.headers["content-disposition"]
 
 
-@pytest.mark.api
+@pytest.mark.integration
 def test_download_endpoint_404_for_unknown_slot(
     client, db, mock_user, patched_celery
 ):
@@ -295,7 +295,7 @@ def test_download_endpoint_404_for_unknown_slot(
     assert bad_slot.status_code == 404
 
 
-@pytest.mark.api
+@pytest.mark.integration
 def test_download_endpoint_member_403(
     client, db, mock_user, patched_celery, unauth_client
 ):

@@ -72,6 +72,19 @@ class Course(Base):
 
     # Relationships
     users = relationship("User", back_populates="course")
+    # Many-to-many relationship to the User table via the
+    # ``course_teachers`` join table. A given course can have several
+    # teachers, and a given teacher can own several courses. This is
+    # the data backing the ``is_course_teacher`` capability check —
+    # see :mod:`app.utils.capabilities`. Phase 1 only defines the
+    # schema; backfill of the existing teacher-per-course relationship
+    # happens in Phase 3.
+    course_teachers = relationship(
+        "CourseTeacher",
+        back_populates="course",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+    )
 
 
 # ----------------------------------------------------------------
@@ -96,6 +109,12 @@ class User(Base):
     deployments = relationship("Deployment", back_populates="user")
     user_to_deployments = relationship("UserToDeployment", back_populates="user")
     user_to_teams = relationship("UserToTeam", back_populates="user")
+    course_teacher_links = relationship(
+        "CourseTeacher",
+        back_populates="user",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+    )
     openstack_credential = relationship(
         "UserOpenStackCredential",
         back_populates="user",
@@ -373,3 +392,39 @@ class AppVersionApproval(Base):
     # Relationships
     app = relationship("App", back_populates="version_approvals")
     reviewer = relationship("User", foreign_keys=[reviewed_by])
+
+
+# ----------------------------------------------------------------
+# COURSE TEACHER MODEL
+# ----------------------------------------------------------------
+# Many-to-many join between courses and users. A row ``(course_id,
+# user_id)`` declares that ``user`` is one of the teachers responsible
+# for ``course``. Backs the per-course "course-teacher" capability
+# (inspect-only on deployments in the course, edit/delete on the
+# course itself). The composite primary key gives us natural
+# idempotency on insert and dedupes accidental double-adds.
+#
+# Pattern note: this mirrors the UserToTeam shape — a tiny join model
+# with two FKs plus a single composite PK — except both FKs together
+# *are* the PK here (instead of an extra synthetic UUID column),
+# because we never need to address a single membership row by id.
+class CourseTeacher(Base):
+    __tablename__ = "course_teachers"
+
+    courseId = Column(
+        "course_id",
+        UUID(as_uuid=True),
+        ForeignKey("courses.courseId", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    userId = Column(
+        "user_id",
+        UUID(as_uuid=True),
+        ForeignKey("users.userId", ondelete="CASCADE"),
+        primary_key=True,
+        index=True,
+    )
+
+    # Relationships
+    course = relationship("Course", back_populates="course_teachers")
+    user = relationship("User", back_populates="course_teacher_links")

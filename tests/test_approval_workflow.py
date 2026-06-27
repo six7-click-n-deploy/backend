@@ -20,7 +20,7 @@ from tests.conftest import create_app_in_db
 # APP LISTING VISIBILITY
 # ================================================================
 
-@pytest.mark.api
+@pytest.mark.integration
 def test_owner_always_sees_own_private_app(client, mock_user, db):
     create_app_in_db(db, mock_user, name="My Private App", is_private=True)
     resp = client.get("/apps/")
@@ -29,7 +29,7 @@ def test_owner_always_sees_own_private_app(client, mock_user, db):
     assert "My Private App" in names
 
 
-@pytest.mark.api
+@pytest.mark.integration
 def test_student_cannot_see_public_app_without_approved_version(student_client, mock_user, db):
     create_app_in_db(db, mock_user, name="Public No Approval", is_private=False)
     resp = student_client.get("/apps/")
@@ -38,7 +38,7 @@ def test_student_cannot_see_public_app_without_approved_version(student_client, 
     assert "Public No Approval" not in names
 
 
-@pytest.mark.api
+@pytest.mark.integration
 def test_student_sees_public_app_after_approval(student_client, mock_admin, mock_user, db):
     app_obj = create_app_in_db(db, mock_user, name="Public Approved App", is_private=False)
 
@@ -56,7 +56,7 @@ def test_student_sees_public_app_after_approval(student_client, mock_admin, mock
 # VERSION SUBMISSION
 # ================================================================
 
-@pytest.mark.api
+@pytest.mark.integration
 def test_submit_version_creates_pending_entry(client, mock_user, db):
     app_obj = create_app_in_db(db, mock_user)
     resp = client.post(f"/apps/{app_obj.appId}/versions/v1.0/submit", json={})
@@ -66,7 +66,7 @@ def test_submit_version_creates_pending_entry(client, mock_user, db):
     assert data["version_tag"] == "v1.0"
 
 
-@pytest.mark.api
+@pytest.mark.integration
 def test_submit_version_duplicate_pending_returns_409(client, mock_user, db):
     app_obj = create_app_in_db(db, mock_user)
     client.post(f"/apps/{app_obj.appId}/versions/v1.0/submit", json={})
@@ -74,7 +74,7 @@ def test_submit_version_duplicate_pending_returns_409(client, mock_user, db):
     assert resp.status_code == 409
 
 
-@pytest.mark.api
+@pytest.mark.integration
 def test_resubmit_after_rejection_succeeds(client, mock_admin, mock_user, db):
     app_obj = create_app_in_db(db, mock_user)
     crud_approvals.submit_version(db, app_obj.appId, "v1.0")
@@ -89,7 +89,7 @@ def test_resubmit_after_rejection_succeeds(client, mock_admin, mock_user, db):
 # MARKER VALIDATION ON SUBMIT
 # ================================================================
 
-@pytest.mark.api
+@pytest.mark.integration
 def test_submit_blocked_when_marker_errors(client, mock_user, db):
     app_obj = create_app_in_db(db, mock_user)
     broken_vars = [{"name": "flavor", "markerError": {
@@ -106,7 +106,7 @@ def test_submit_blocked_when_marker_errors(client, mock_user, db):
     assert detail["marker_errors"][0]["code"] == "MARKER_UNKNOWN_OS_TYPE"
 
 
-@pytest.mark.api
+@pytest.mark.integration
 def test_submit_succeeds_with_clean_markers(client, mock_user, db):
     app_obj = create_app_in_db(db, mock_user)
     clean_vars = [{"name": "flavor", "description": "@openstack:flavor", "osType": "flavor"}]
@@ -120,7 +120,7 @@ def test_submit_succeeds_with_clean_markers(client, mock_user, db):
 # ADMIN APPROVE / REJECT / REVOKE
 # ================================================================
 
-@pytest.mark.api
+@pytest.mark.integration
 def test_admin_approve_sets_status_approved(client, admin_client, mock_user, db):
     app_obj = create_app_in_db(db, mock_user)
     client.post(f"/apps/{app_obj.appId}/versions/v1.0/submit", json={})
@@ -129,7 +129,7 @@ def test_admin_approve_sets_status_approved(client, admin_client, mock_user, db)
     assert resp.json()["status"] == "approved"
 
 
-@pytest.mark.api
+@pytest.mark.integration
 def test_admin_reject_requires_reason(client, admin_client, mock_user, db):
     app_obj = create_app_in_db(db, mock_user)
     client.post(f"/apps/{app_obj.appId}/versions/v1.0/submit", json={})
@@ -142,7 +142,7 @@ def test_admin_reject_requires_reason(client, admin_client, mock_user, db):
     assert resp.json()["rejection_reason"] == "insecure config"
 
 
-@pytest.mark.api
+@pytest.mark.integration
 def test_admin_reject_without_reason_returns_422(client, admin_client, mock_user, db):
     app_obj = create_app_in_db(db, mock_user)
     client.post(f"/apps/{app_obj.appId}/versions/v1.0/submit", json={})
@@ -152,7 +152,7 @@ def test_admin_reject_without_reason_returns_422(client, admin_client, mock_user
     assert resp.status_code == 422
 
 
-@pytest.mark.api
+@pytest.mark.integration
 def test_admin_revoke_approved_version(client, admin_client, mock_user, db):
     app_obj = create_app_in_db(db, mock_user)
     client.post(f"/apps/{app_obj.appId}/versions/v1.0/submit", json={})
@@ -166,13 +166,13 @@ def test_admin_revoke_approved_version(client, admin_client, mock_user, db):
     assert resp.json()["rejection_reason"] == "security issue discovered post-approval"
 
 
-@pytest.mark.api
+@pytest.mark.integration
 def test_non_admin_cannot_access_admin_endpoints(client):
     resp = client.get("/admin/apps/versions/pending")
     assert resp.status_code == 403
 
 
-@pytest.mark.api
+@pytest.mark.integration
 def test_admin_pending_queue_contains_submission(client, admin_client, mock_user, db):
     app_obj = create_app_in_db(db, mock_user)
     client.post(f"/apps/{app_obj.appId}/versions/v2.0/submit", json={})
@@ -186,7 +186,7 @@ def test_admin_pending_queue_contains_submission(client, admin_client, mock_user
 # GIT LINK IMMUTABILITY
 # ================================================================
 
-@pytest.mark.api
+@pytest.mark.integration
 def test_update_app_git_link_is_ignored(client, mock_user, db):
     app_obj = create_app_in_db(db, mock_user)
     original_git_link = app_obj.git_link
@@ -198,7 +198,7 @@ def test_update_app_git_link_is_ignored(client, mock_user, db):
     assert resp.json()["git_link"] == original_git_link
 
 
-@pytest.mark.api
+@pytest.mark.integration
 def test_update_app_name_still_works(client, mock_user, db):
     app_obj = create_app_in_db(db, mock_user)
     resp = client.put(f"/apps/{app_obj.appId}", json={"name": "Renamed App"})
@@ -210,14 +210,14 @@ def test_update_app_name_still_works(client, mock_user, db):
 # IS_PRIVATE FIELD
 # ================================================================
 
-@pytest.mark.api
+@pytest.mark.integration
 def test_create_app_with_is_private(client):
     resp = client.post("/apps/", json={"name": "Secret App", "is_private": True})
     assert resp.status_code == 201
     assert resp.json()["is_private"] is True
 
 
-@pytest.mark.api
+@pytest.mark.integration
 def test_toggle_privacy_via_put(client, mock_user, db):
     app_obj = create_app_in_db(db, mock_user, is_private=False)
     resp = client.put(f"/apps/{app_obj.appId}", json={"is_private": True})

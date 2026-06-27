@@ -8,7 +8,7 @@ from app.database import get_db
 from app.models import User
 from app.schemas import TeamCreate, TeamResponse, TeamUpdate, TeamWithMembers
 from app.utils.keycloak_auth import get_current_user_keycloak
-from app.utils.permissions import get_current_teacher_or_admin
+from app.utils.permissions import require_staff
 
 router = APIRouter()
 
@@ -20,15 +20,19 @@ router = APIRouter()
 def list_teams(
     skip: int = 0,
     limit: int = 100,
-    user_group_id: UUID | None = None,
+    deployment_id: UUID | None = None,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user_keycloak)
 ):
     """
-    Get all teams with optional user group filter
-    - **All authenticated users** can view teams
+    Get all teams, optionally filtered to a single deployment.
+
+    The ``deployment_id`` query parameter replaces the old
+    ``user_group_id`` filter, which referenced a model that no
+    longer exists. All authenticated users may list teams; per-team
+    membership gating happens at ``GET /teams/{team_id}``.
     """
-    teams = crud_teams.get_teams(db, skip=skip, limit=limit, user_group_id=user_group_id)
+    teams = crud_teams.get_teams(db, skip=skip, limit=limit, deployment_id=deployment_id)
     return teams
 
 
@@ -58,7 +62,7 @@ def get_team(
 def create_team(
     team: TeamCreate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_teacher_or_admin)
+    current_user: User = Depends(require_staff)
 ):
     """
     Create a new team
@@ -75,7 +79,7 @@ def update_team(
     team_id: UUID,
     team_update: TeamUpdate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_teacher_or_admin)
+    current_user: User = Depends(require_staff)
 ):
     """
     Update a team
@@ -97,7 +101,7 @@ def update_team(
 def delete_team(
     team_id: UUID,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_teacher_or_admin)
+    current_user: User = Depends(require_staff)
 ):
     """
     Delete a team
@@ -120,7 +124,7 @@ def add_user_to_team(
     team_id: UUID,
     user_id: UUID,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_teacher_or_admin)
+    current_user: User = Depends(require_staff)
 ):
     """
     Add a user to a team
@@ -143,7 +147,7 @@ def remove_user_from_team(
     team_id: UUID,
     user_id: UUID,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_teacher_or_admin)
+    current_user: User = Depends(require_staff)
 ):
     """
     Remove a user from a team

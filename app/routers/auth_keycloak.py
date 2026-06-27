@@ -1,29 +1,17 @@
 """
 Auth Router - Keycloak Version
-Minimal endpoints: Only /me for user info
-Login/Register/Refresh handled by Keycloak
-"""
-from fastapi import APIRouter, Depends
 
-from app.models import User
-from app.schemas import UserResponse
-from app.utils.keycloak_auth import get_current_user_keycloak
+Phase 2 cleanup (Bug #25): the redundant ``/auth/me`` endpoint is gone.
+Use ``/users/me`` — it returns the richer ``UserWithCourse`` shape and
+is the single source of truth for "who am I".
+
+The only path still served here is the public health check, kept so
+operators can probe the auth subsystem without authenticating.
+"""
+from fastapi import APIRouter
 
 router = APIRouter()
 
-# ----------------------------------------------------------------
-# GET CURRENT USER
-# ----------------------------------------------------------------
-@router.get("/me", response_model=UserResponse)
-def get_me(current_user: User = Depends(get_current_user_keycloak)):
-    """
-    Get current authenticated user info
-
-    - Requires valid Keycloak JWT token in Authorization header
-    - Returns user data from local database
-    - User is created/updated automatically via Just-in-Time Provisioning
-    """
-    return current_user
 
 # ----------------------------------------------------------------
 # HEALTH CHECK

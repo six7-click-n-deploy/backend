@@ -21,8 +21,10 @@ class UserCreate(UserBase):
 
 
 class UserUpdate(BaseModel):
-    email: EmailStr | None = None
-    username: str | None = None
+    # Phase 2 — Profile-Edit (firstName/lastName/email/username) ist
+    # nicht mehr Teil dieser App. Self-Service läuft ausschließlich
+    # über Keycloak. Der einzige verbleibende Update-Pfad ist
+    # ``role`` und ist Admin-only (siehe ``PUT /users/{id}``).
     role: UserRole | None = None
     courseId: UUID | None = None
 
@@ -456,36 +458,19 @@ class TaskResponse(TaskBase):
 
 
 # ----------------------------------------------------------------
-# USER GROUP SCHEMAS
-# ----------------------------------------------------------------
-class UserGroupBase(BaseModel):
-    deploymentId: UUID
-
-
-class UserGroupCreate(UserGroupBase):
-    userIds: list[UUID] = []
-    courseIds: list[UUID] = []
-
-
-class UserGroupResponse(UserGroupBase):
-    userGroupId: UUID
-
-    model_config = ConfigDict(from_attributes=True)
-
-
-class UserGroupWithMembers(UserGroupResponse):
-    users: list[UserResponse] = []
-    courses: list[CourseResponse] = []
-
-    model_config = ConfigDict(from_attributes=True)
-
-
-# ----------------------------------------------------------------
 # TEAM SCHEMAS
+#
+# Teams sind heute direkt an ein Deployment gebunden (FK
+# ``deployments.deploymentId`` -> ``Team.deploymentId``). Das alte
+# Zwischenmodell ``UserGroup`` wurde im Pre-RBAC-Refactor entfernt;
+# alle ``userGroupId``-Felder waren danach toter Schema-Code, der
+# beim Response-Serialisieren auf ``Team`` (das nur ``deploymentId``
+# hat) zu 500 ResponseValidationError führte. Die Schemas spiegeln
+# jetzt das Modell 1:1.
 # ----------------------------------------------------------------
 class TeamBase(BaseModel):
     name: str
-    userGroupId: UUID
+    deploymentId: UUID
 
 
 class TeamCreate(TeamBase):

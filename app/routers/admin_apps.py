@@ -14,7 +14,7 @@ from app.schemas import (
     AppVersionApprovalResponse,
     AppVersionApprovalWithApp,
 )
-from app.utils.permissions import get_current_admin
+from app.utils.permissions import require_admin
 
 router = APIRouter()
 
@@ -29,7 +29,7 @@ router = APIRouter()
 )
 def list_pending_versions(
     db: Session = Depends(get_db),
-    _: User = Depends(get_current_admin),
+    _: User = Depends(require_admin),
 ):
     """Return all version submissions awaiting admin review, oldest first."""
     return crud_approvals.get_pending_approvals(db)
@@ -47,7 +47,7 @@ def approve_version(
     app_id: UUID,
     version_tag: str,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_admin),
+    current_user: User = Depends(require_admin),
 ):
     """Approve a PENDING version — makes it deployable by all users.
 
@@ -104,7 +104,7 @@ def reject_version(
     version_tag: str,
     body: AppVersionApprovalDecision,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_admin),
+    current_user: User = Depends(require_admin),
 ):
     """Reject a PENDING version with a mandatory reason."""
     _require_app(db, app_id)
@@ -126,7 +126,7 @@ def revoke_version(
     version_tag: str,
     body: AppVersionApprovalDecision,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_admin),
+    current_user: User = Depends(require_admin),
 ):
     """Revoke a previously APPROVED version with a mandatory reason (sets status to REJECTED)."""
     _require_app(db, app_id)
@@ -144,7 +144,7 @@ def revoke_version(
 def deactivate_app(
     app_id: UUID,
     db: Session = Depends(get_db),
-    _: User = Depends(get_current_admin),
+    _: User = Depends(require_admin),
 ):
     """Emergency deactivation: set app to private so it disappears from
     the store immediately. Does not delete the app or its deployments."""

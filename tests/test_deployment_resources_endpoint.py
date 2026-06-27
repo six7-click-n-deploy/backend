@@ -202,7 +202,7 @@ def patched_celery_send():
 # ----------------------------------------------------------------
 # GET /resources — Stage 1
 # ----------------------------------------------------------------
-@pytest.mark.api
+@pytest.mark.integration
 def test_list_resources_joins_live_status(
     client, db, mock_user, patched_user_connection
 ):
@@ -234,7 +234,7 @@ def test_list_resources_joins_live_status(
     assert network["lifecycle"] is None
 
 
-@pytest.mark.api
+@pytest.mark.integration
 def test_list_resources_skip_refresh_returns_cached_only(
     client, db, mock_user, patched_user_connection
 ):
@@ -256,7 +256,7 @@ def test_list_resources_skip_refresh_returns_cached_only(
         assert r["lifecycle"] is None
 
 
-@pytest.mark.api
+@pytest.mark.integration
 def test_list_resources_owner_only(
     client, db, mock_user, mock_student, patched_user_connection
 ):
@@ -282,7 +282,7 @@ def test_list_resources_owner_only(
 # ----------------------------------------------------------------
 # GET /resources/{address} — Stage 2
 # ----------------------------------------------------------------
-@pytest.mark.api
+@pytest.mark.integration
 def test_resource_detail_loads_stage2(
     client, db, mock_user, patched_user_connection
 ):
@@ -347,7 +347,7 @@ def test_resource_detail_loads_stage2(
     assert body["volumes"][0]["bootable"] is True
 
 
-@pytest.mark.api
+@pytest.mark.integration
 def test_resource_detail_unknown_address_returns_404(
     client, db, mock_user, patched_user_connection
 ):
@@ -363,7 +363,7 @@ def test_resource_detail_unknown_address_returns_404(
     assert response.json()["detail"]["reason"] == "resource_not_in_state"
 
 
-@pytest.mark.api
+@pytest.mark.integration
 def test_resource_detail_invalid_address_returns_422(
     client, db, mock_user, patched_user_connection
 ):
@@ -382,7 +382,7 @@ def test_resource_detail_invalid_address_returns_422(
 # ----------------------------------------------------------------
 # POST /resources/{address}/redeploy — whitelist + dispatch
 # ----------------------------------------------------------------
-@pytest.mark.api
+@pytest.mark.integration
 def test_redeploy_resource_dispatches_celery_task(
     client, db, mock_user, patched_user_connection, patched_celery_send
 ):
@@ -408,7 +408,7 @@ def test_redeploy_resource_dispatches_celery_task(
     assert args[-1] == ADDR_A
 
 
-@pytest.mark.api
+@pytest.mark.integration
 def test_redeploy_rejects_network_address(
     client, db, mock_user, patched_user_connection, patched_celery_send
 ):
@@ -426,7 +426,7 @@ def test_redeploy_rejects_network_address(
     assert not patched_celery_send.called
 
 
-@pytest.mark.api
+@pytest.mark.integration
 def test_redeploy_rejects_unknown_address(
     client, db, mock_user, patched_user_connection, patched_celery_send
 ):

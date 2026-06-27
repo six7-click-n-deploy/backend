@@ -82,7 +82,7 @@ def _make_task(db, deployment_id, *, type_, status, created_at):
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.api
+@pytest.mark.integration
 def test_list_deployments_returns_status_and_created_at(client, db, mock_user):
     """Latest task drives ``status``, first task drives ``created_at``.
 
@@ -120,7 +120,7 @@ def test_list_deployments_returns_status_and_created_at(client, db, mock_user):
     assert match["created_at"].startswith("2026-01-01")
 
 
-@pytest.mark.api
+@pytest.mark.integration
 def test_list_deployments_status_none_when_no_tasks(client, db, mock_user):
     """Deployments with no task rows must still serialize cleanly."""
     app = _make_app(db, mock_user.userId)
@@ -141,7 +141,7 @@ def test_list_deployments_status_none_when_no_tasks(client, db, mock_user):
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.api
+@pytest.mark.integration
 def test_list_deployments_status_filter_does_not_lose_rows(client, db, mock_user):
     """``?status_filter=success&limit=2`` must return exactly 2 rows when
     at least 2 successful deploys exist, even if other deployments were
@@ -178,7 +178,7 @@ def test_list_deployments_status_filter_does_not_lose_rows(client, db, mock_user
         assert item["deploymentId"] in success_ids
 
 
-@pytest.mark.api
+@pytest.mark.integration
 def test_list_deployments_destroying_filter(client, db, mock_user):
     """``?status_filter=destroying`` matches deploys with a destroy task
     in ``pending``/``running`` — the synthetic value never lives in the
@@ -217,7 +217,7 @@ def test_list_deployments_destroying_filter(client, db, mock_user):
     assert {d["deploymentId"] for d in body} == {str(destroying.deploymentId)}
 
 
-@pytest.mark.api
+@pytest.mark.integration
 def test_list_deployments_running_filter_excludes_destroying(
     client, db, mock_user
 ):
@@ -257,7 +257,7 @@ def test_list_deployments_running_filter_excludes_destroying(
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.api
+@pytest.mark.integration
 def test_list_deployments_query_count_does_not_scale_with_rows(
     client, db, mock_user
 ):
@@ -314,7 +314,7 @@ def test_list_deployments_query_count_does_not_scale_with_rows(
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.api
+@pytest.mark.integration
 def test_list_deployments_student_sees_team_member_deployments(db, mock_user):
     """A STUDENT who is a member of a team on someone else's deployment
     must see that deployment via the list endpoint — the OR-filter in
