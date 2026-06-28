@@ -446,11 +446,14 @@ def _attach_files_to_user_input(
     # filter — keeps backward compatibility for any caller that doesn't
     # supply ``variable_definitions``.
     allowed_exts_by_var: dict[str, list[str]] = {}
+    scoped_file_vars: set[str] = set()
     if variable_definitions:
         for vdef in variable_definitions:
             exts = vdef.get("fileExtensions")
             if exts:
                 allowed_exts_by_var[vdef["name"]] = [e.lower() for e in exts]
+            if vdef.get("varScope") in ("team", "user"):
+                scoped_file_vars.add(vdef["name"])
 
     total_bytes = 0
     terraform_block = dict(base.get("terraform") or {})
