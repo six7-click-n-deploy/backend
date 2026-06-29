@@ -31,8 +31,7 @@ from app.schemas import (
     DeploymentTeamResponse,
     TaskSummary,
 )
-from app.services import deployment_notifier
-from app.services import email_service
+from app.services import deployment_notifier, email_service
 from app.services import lifecycle as lifecycle_service
 from app.services import task_service as task_service_module
 from app.services.deployment_pubsub import pubsub

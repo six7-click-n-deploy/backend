@@ -329,7 +329,7 @@ def test_resend_access_returns_503_when_smtp_disabled(
     assert body["detail"]["reason"] == "smtp_disabled"
     # Retry-After header advertises the recommended back-off; clients
     # may use it to throttle a "try again later" affordance.
-    assert "retry-after" in {k.lower() for k in response.headers.keys()}
+    assert "retry-after" in {k.lower() for k in response.headers}
     m_resend.assert_not_called()
 
 
