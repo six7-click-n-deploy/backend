@@ -7,8 +7,10 @@ user emails. The worker stays infrastructure-only.
 Sending strategy:
 
 * Gmail SMTP via ``settings.SMTP_*`` — App password required when 2FA is
-  on. Set ``SMTP_USER=""`` to disable mail entirely (useful in dev or
-  CI); the notify hook turns into a no-op without raising.
+  on. The kill-switch is ``settings.SMTP_ENABLED`` (off by default); set
+  it to ``True`` and provide ``SMTP_USER`` / ``SMTP_PASSWORD`` to turn
+  delivery on. With either condition missing, ``send_email`` becomes a
+  no-op and returns ``False`` without raising.
 * Port-aware connection: ``465`` opens an implicit-TLS connection
   (``SMTP_SSL``); anything else (typically ``587``) uses ``SMTP`` and
   upgrades via STARTTLS. Some corporate networks (SAP intranet
@@ -79,6 +81,31 @@ def render(template_name: str, **context: Any) -> str:
     return env.get_template(template_name).render(**context)
 
 
+def is_smtp_enabled() -> bool:
+    """Effective SMTP availability — the predicate every caller should use.
+
+    Both conditions must hold for mail delivery to even be attempted:
+      * ``SMTP_ENABLED`` is the explicit operator kill-switch (default
+        ``False``). It exists so a dev / CI environment can leave the
+        Gmail app-password in ``.env`` for later but keep delivery off.
+      * ``SMTP_USER`` and ``SMTP_PASSWORD`` must be populated.
+        ``SMTP_ENABLED=True`` with empty credentials is treated as
+        "configuration in progress" and still skips delivery — better
+        than crashing at submit-time with an auth error.
+
+    Returning a single boolean lets the resend-access endpoint
+    short-circuit BEFORE accessing the deployment / notifier pipeline,
+    so a 503 response carries the right semantic ("we chose not to
+    send") instead of leaking a 502 ("we tried and failed") when the
+    cause is purely a configuration choice.
+    """
+    return bool(
+        settings.SMTP_ENABLED
+        and settings.SMTP_USER
+        and settings.SMTP_PASSWORD
+    )
+
+
 def send_email(
     *,
     to: str | list[str],
@@ -92,6 +119,9 @@ def send_email(
     sending raised. Never raises — the deployment notification flow
     must keep going even if mail is broken.
     """
+    if not settings.SMTP_ENABLED:
+        logger.info("SMTP disabled (SMTP_ENABLED=false), skipping email to %s", to)
+        return False
     if not settings.SMTP_USER or not settings.SMTP_PASSWORD:
         logger.info("SMTP not configured (SMTP_USER empty), skipping email to %s", to)
         return False

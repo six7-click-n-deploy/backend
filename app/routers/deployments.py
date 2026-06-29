@@ -31,7 +31,7 @@ from app.schemas import (
     DeploymentTeamResponse,
     TaskSummary,
 )
-from app.services import deployment_notifier
+from app.services import deployment_notifier, email_service
 from app.services import lifecycle as lifecycle_service
 from app.services import task_service as task_service_module
 from app.services.deployment_pubsub import pubsub
@@ -1208,8 +1208,8 @@ def _dispatch_lifecycle_task(
     except Exception:
         user_vars = {}
 
-    # Belt + braces: for non-deploy lifecycle tasks (destroy, pause,
-    # resume, redeploy), strip any ``@openstack:file:*`` payloads
+    # Belt + braces: for lifecycle tasks that do NOT recreate the VM
+    # (destroy, pause, resume), strip any ``@openstack:file:*`` payloads
     # from the user-vars BEFORE they reach the worker. Files are only
     # consumed at apply-time by cloud-init's write_files; everything
     # else just hands the same var-set to Terraform which then
@@ -1223,10 +1223,17 @@ def _dispatch_lifecycle_task(
     # violates the variable's object type. Dropping the var
     # altogether lets Terraform fall back on the HCL default.
     #
-    # Deploy is the only lifecycle that legitimately needs the file
-    # bytes (cloud-init writes them) — that path enters the worker
-    # via ``create_deployment`` directly, not through this helper.
-    if task_type != TaskType.DEPLOY:
+    # REDEPLOY is the special case: ``terraform apply -replace`` destroys
+    # and recreates the VM, so cloud-init runs fresh and MUST receive the
+    # original ``write_files`` payload — otherwise the replaced VM ends
+    # up empty even though the user/group/password config is preserved.
+    # We therefore keep the file vars on REDEPLOY and let the persisted
+    # base64 payload flow through to the worker, mirroring the initial
+    # deploy path.
+    #
+    # DEPLOY/UPDATE legitimately need the file bytes too — they don't
+    # enter the worker via this helper.
+    if task_type in (TaskType.DESTROY, TaskType.PAUSE, TaskType.RESUME):
         terraform_block = user_vars.get("terraform")
         if isinstance(terraform_block, dict):
             user_vars = {
@@ -1795,10 +1802,35 @@ def resend_access_credentials(
     # any team. Without this check a student in team A could trigger
     # a mail to anyone else's address, which is both privacy-leaky
     # and a tiny SMTP-amplification vector.
+    #
+    # This 403 is decided BEFORE the SMTP-disabled 503 below: a
+    # not-authorised caller must not learn the SMTP-state of the
+    # platform — that would be a (small) information disclosure.
     if not is_deployment_owner_view(deployment, current_user) and str(user_id) != str(current_user.userId):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Members may only resend their own access mail",
+        )
+
+    # SMTP kill-switch check: refuse cleanly with 503 BEFORE running the
+    # notifier so the response carries the correct semantic ("we chose
+    # not to send" — operator configuration) rather than the existing
+    # 502 ("we tried and SMTP rejected" — infrastructure failure).
+    # Frontend distinguishes the two reasons in the toast text so the
+    # user understands whether to ask an admin to enable mail or to
+    # simply retry. The 503 + Retry-After header signals "service
+    # temporarily unavailable; come back later" semantics.
+    #
+    # Order vs. 409 in-flight: a 503 here is non-recoverable until an
+    # operator flips the env-flag, whereas 409 is a transient state
+    # the caller can simply wait out. Returning the 503 first matches
+    # the "service-level concern beats per-request concern" pattern
+    # used by every other 5xx vs 4xx ordering in this router.
+    if not email_service.is_smtp_enabled():
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={"reason": "smtp_disabled"},
+            headers={"Retry-After": "3600"},
         )
 
     # Refuse while another lifecycle action is in flight. Resending

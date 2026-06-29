@@ -12,6 +12,7 @@ from unittest.mock import patch
 
 import pytest
 
+from app.config import settings
 from app.models import (
     App,
     Deployment,
@@ -21,6 +22,23 @@ from app.models import (
     TaskType,
     UserOpenStackCredential,
 )
+
+
+@pytest.fixture(autouse=True)
+def _smtp_enabled_default(monkeypatch):
+    """Most tests in this file don't care about SMTP, but the
+    ``test_resend_access_rejected_while_action_in_flight`` cases
+    do — they hit the resend-access endpoint and expect a 409 from
+    the in-flight gate. With ``SMTP_ENABLED`` defaulting to ``False``,
+    the kill-switch gate (which sits before the in-flight check)
+    would short-circuit with 503 first. Enabling SMTP by default
+    here keeps every test in this file exercising the lifecycle
+    semantics it was written for, without each one needing its own
+    monkeypatch.
+    """
+    monkeypatch.setattr(settings, "SMTP_ENABLED", True, raising=False)
+    monkeypatch.setattr(settings, "SMTP_USER", "test@example.com", raising=False)
+    monkeypatch.setattr(settings, "SMTP_PASSWORD", "test-password", raising=False)
 
 
 def _make_deployment_with_creds(
