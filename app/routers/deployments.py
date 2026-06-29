@@ -446,11 +446,14 @@ def _attach_files_to_user_input(
     # filter — keeps backward compatibility for any caller that doesn't
     # supply ``variable_definitions``.
     allowed_exts_by_var: dict[str, list[str]] = {}
+    scoped_file_vars: set[str] = set()
     if variable_definitions:
         for vdef in variable_definitions:
             exts = vdef.get("fileExtensions")
             if exts:
                 allowed_exts_by_var[vdef["name"]] = [e.lower() for e in exts]
+            if vdef.get("varScope") in ("team", "user"):
+                scoped_file_vars.add(vdef["name"])
 
     total_bytes = 0
     terraform_block = dict(base.get("terraform") or {})
@@ -550,23 +553,22 @@ def _attach_files_to_user_input(
                     },
                 )
 
-            # Map shape exactly to the HCL contract documented for
-            # ``@openstack:file:<scope>`` markers — one ``object``
-            # per slot, no extra wrapper. The earlier
-            # ``{slot: {"uploaded": {...}}}`` indirection was meant
-            # to leave room for multi-file-per-slot, but that would
-            # need a different HCL type (``list(object(...))``)
-            # anyway, so the wrapper bought nothing and forced every
-            # template to either tolerate the alien layer or fail
-            # validation with "attribute X is required" the way
-            # this deploy did.
             encoded_slots[slot_key] = {
                 "name": upload.name,
                 "content_b64": content_b64,
                 "size": upload.size,
                 "content_type": upload.content_type or "application/octet-stream",
             }
-        terraform_block[var_name] = encoded_slots
+        # scope=team|user: HCL type is map(map(object({...}))) —
+        # outer key is the team/user slot, inner key is the upload slot.
+        # scope=all: HCL type is map(object({...})) — flat map.
+        if var_name in scoped_file_vars:
+            terraform_block[var_name] = {
+                slot_key: {"uploaded": file_obj}
+                for slot_key, file_obj in encoded_slots.items()
+            }
+        else:
+            terraform_block[var_name] = encoded_slots
 
     base["terraform"] = terraform_block
     return base
