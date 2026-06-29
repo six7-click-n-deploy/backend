@@ -32,6 +32,7 @@ from app.schemas import (
     TaskSummary,
 )
 from app.services import deployment_notifier
+from app.services import email_service
 from app.services import lifecycle as lifecycle_service
 from app.services import task_service as task_service_module
 from app.services.deployment_pubsub import pubsub
@@ -1802,10 +1803,35 @@ def resend_access_credentials(
     # any team. Without this check a student in team A could trigger
     # a mail to anyone else's address, which is both privacy-leaky
     # and a tiny SMTP-amplification vector.
+    #
+    # This 403 is decided BEFORE the SMTP-disabled 503 below: a
+    # not-authorised caller must not learn the SMTP-state of the
+    # platform — that would be a (small) information disclosure.
     if not is_deployment_owner_view(deployment, current_user) and str(user_id) != str(current_user.userId):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Members may only resend their own access mail",
+        )
+
+    # SMTP kill-switch check: refuse cleanly with 503 BEFORE running the
+    # notifier so the response carries the correct semantic ("we chose
+    # not to send" — operator configuration) rather than the existing
+    # 502 ("we tried and SMTP rejected" — infrastructure failure).
+    # Frontend distinguishes the two reasons in the toast text so the
+    # user understands whether to ask an admin to enable mail or to
+    # simply retry. The 503 + Retry-After header signals "service
+    # temporarily unavailable; come back later" semantics.
+    #
+    # Order vs. 409 in-flight: a 503 here is non-recoverable until an
+    # operator flips the env-flag, whereas 409 is a transient state
+    # the caller can simply wait out. Returning the 503 first matches
+    # the "service-level concern beats per-request concern" pattern
+    # used by every other 5xx vs 4xx ordering in this router.
+    if not email_service.is_smtp_enabled():
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={"reason": "smtp_disabled"},
+            headers={"Retry-After": "3600"},
         )
 
     # Refuse while another lifecycle action is in flight. Resending

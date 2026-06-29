@@ -14,6 +14,7 @@ from unittest.mock import patch
 
 import pytest
 
+from app.config import settings
 from app.models import (
     App,
     Deployment,
@@ -25,6 +26,25 @@ from app.models import (
     UserOpenStackCredential,
     UserToTeam,
 )
+
+
+@pytest.fixture(autouse=True)
+def _smtp_enabled(monkeypatch):
+    """Default every resend-access test into 'SMTP is on' so the
+    new kill-switch in the endpoint does not short-circuit with 503
+    before the real test logic runs.
+
+    Tests that specifically exercise the disabled path override this
+    fixture explicitly by calling ``monkeypatch.setattr`` again on
+    the same setting — pytest applies the closest override.
+
+    ``raising=False`` lets us patch even when an older test config
+    forgot to declare the field (defensive — the field exists today
+    but we don't want a refactor surfacing here).
+    """
+    monkeypatch.setattr(settings, "SMTP_ENABLED", True, raising=False)
+    monkeypatch.setattr(settings, "SMTP_USER", "test@example.com", raising=False)
+    monkeypatch.setattr(settings, "SMTP_PASSWORD", "test-password", raising=False)
 
 
 def _seed_deployment_with_team(
@@ -271,3 +291,74 @@ def test_resend_access_404_for_unknown_user(client, db, mock_user):
     body = response.json()
     assert body["detail"]["reason"] == "user_not_in_team"
     m_resend.assert_called_once()
+
+
+# ----------------------------------------------------------------
+# SMTP kill-switch (``SMTP_ENABLED=False``) — endpoint short-circuits
+# with 503 ``smtp_disabled`` BEFORE invoking the notifier. The
+# distinction from 502 ``smtp_send_failed`` is intentional: 503 means
+# "operator chose not to send" (configuration), 502 means "we tried
+# and SMTP refused" (infrastructure). The frontend toast text branches
+# on the reason so users understand whether to ping an admin or just
+# retry.
+# ----------------------------------------------------------------
+@pytest.mark.integration
+def test_resend_access_returns_503_when_smtp_disabled(
+    client, db, mock_user, monkeypatch,
+):
+    """SMTP_ENABLED=false → 503 with reason=smtp_disabled. The notifier
+    must NOT be called; the deployment lookup may happen first but
+    the only externally visible effect is the 503 short-circuit.
+    """
+    monkeypatch.setattr(settings, "SMTP_ENABLED", False, raising=False)
+    deployment, team = _seed_deployment_with_team(db, mock_user, member=mock_user)
+
+    with patch(
+        "app.routers.deployments.deployment_notifier.resend_user_access",
+        return_value=True,
+    ) as m_resend:
+        response = client.post(
+            f"/deployments/{deployment.deploymentId}"
+            f"/teams/{team.teamId}"
+            f"/users/{mock_user.userId}"
+            f"/resend-access"
+        )
+
+    assert response.status_code == 503, response.text
+    body = response.json()
+    assert body["detail"]["reason"] == "smtp_disabled"
+    # Retry-After header advertises the recommended back-off; clients
+    # may use it to throttle a "try again later" affordance.
+    assert "retry-after" in {k.lower() for k in response.headers.keys()}
+    m_resend.assert_not_called()
+
+
+@pytest.mark.integration
+def test_resend_access_returns_503_when_smtp_credentials_missing(
+    client, db, mock_user, monkeypatch,
+):
+    """SMTP_ENABLED=True but credentials empty → still 503 (treated as
+    'configuration in progress'). Same reason code as the explicit
+    kill-switch — the frontend doesn't need to distinguish, and
+    leaking 'credentials are missing' through a separate reason
+    would be a small information disclosure.
+    """
+    monkeypatch.setattr(settings, "SMTP_ENABLED", True, raising=False)
+    monkeypatch.setattr(settings, "SMTP_USER", "", raising=False)
+    monkeypatch.setattr(settings, "SMTP_PASSWORD", "", raising=False)
+    deployment, team = _seed_deployment_with_team(db, mock_user, member=mock_user)
+
+    with patch(
+        "app.routers.deployments.deployment_notifier.resend_user_access",
+        return_value=True,
+    ) as m_resend:
+        response = client.post(
+            f"/deployments/{deployment.deploymentId}"
+            f"/teams/{team.teamId}"
+            f"/users/{mock_user.userId}"
+            f"/resend-access"
+        )
+
+    assert response.status_code == 503, response.text
+    assert response.json()["detail"]["reason"] == "smtp_disabled"
+    m_resend.assert_not_called()
