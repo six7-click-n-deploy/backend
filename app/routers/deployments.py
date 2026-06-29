@@ -1208,8 +1208,8 @@ def _dispatch_lifecycle_task(
     except Exception:
         user_vars = {}
 
-    # Belt + braces: for non-deploy lifecycle tasks (destroy, pause,
-    # resume, redeploy), strip any ``@openstack:file:*`` payloads
+    # Belt + braces: for lifecycle tasks that do NOT recreate the VM
+    # (destroy, pause, resume), strip any ``@openstack:file:*`` payloads
     # from the user-vars BEFORE they reach the worker. Files are only
     # consumed at apply-time by cloud-init's write_files; everything
     # else just hands the same var-set to Terraform which then
@@ -1223,10 +1223,17 @@ def _dispatch_lifecycle_task(
     # violates the variable's object type. Dropping the var
     # altogether lets Terraform fall back on the HCL default.
     #
-    # Deploy is the only lifecycle that legitimately needs the file
-    # bytes (cloud-init writes them) — that path enters the worker
-    # via ``create_deployment`` directly, not through this helper.
-    if task_type != TaskType.DEPLOY:
+    # REDEPLOY is the special case: ``terraform apply -replace`` destroys
+    # and recreates the VM, so cloud-init runs fresh and MUST receive the
+    # original ``write_files`` payload — otherwise the replaced VM ends
+    # up empty even though the user/group/password config is preserved.
+    # We therefore keep the file vars on REDEPLOY and let the persisted
+    # base64 payload flow through to the worker, mirroring the initial
+    # deploy path.
+    #
+    # DEPLOY/UPDATE legitimately need the file bytes too — they don't
+    # enter the worker via this helper.
+    if task_type in (TaskType.DESTROY, TaskType.PAUSE, TaskType.RESUME):
         terraform_block = user_vars.get("terraform")
         if isinstance(terraform_block, dict):
             user_vars = {
