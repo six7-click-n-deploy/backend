@@ -1076,6 +1076,52 @@ def _parse_one_variable(
     return var_info
 
 
+def _iter_variable_blocks(content: str):
+    """Yield ``(var_name, var_block, block_offset)`` for each HCL
+    ``variable "name" { ... }`` block, brace-balanced.
+
+    A naive ``variable\\s+"([^"]+)"\\s*\\{([^}]+)\\}`` regex stops the
+    block at the FIRST ``}`` and therefore truncates any variable whose
+    type or default literal contains braces — e.g. ``type =
+    object({...})``, ``map(...)`` or ``default = {}``. That corrupted
+    the parsed default (``default = {}`` was captured as the string
+    ``"{"``), which broke the default-baseline the wizard compares
+    against for scoped/map variables such as ``team_flavor_ids``.
+
+    We match only the block HEAD with a regex and then walk the string
+    counting ``{``/``}`` until depth returns to zero — the same
+    brace-balancing approach already used in ``_parse_marker``.
+
+    ``var_block`` is the content BETWEEN the outer braces (exclusive),
+    matching what the old ``match.group(2)`` returned so downstream
+    parsing (``_parse_one_variable``) is unchanged. ``block_offset`` is
+    the start index of the whole ``variable`` declaration, as the old
+    ``match.start()`` provided (used for line-number hints).
+    """
+    head_pattern = r'variable\s+"([^"]+)"\s*\{'
+    for head in re.finditer(head_pattern, content):
+        var_name = head.group(1)
+        block_offset = head.start()
+        open_brace = head.end() - 1  # index of the ``{`` matched above
+        depth = 0
+        end_index = -1
+        for i in range(open_brace, len(content)):
+            ch = content[i]
+            if ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    end_index = i
+                    break
+        if end_index == -1:
+            # Unbalanced braces — skip this malformed block rather than
+            # emitting a truncated one.
+            continue
+        var_block = content[open_brace + 1:end_index]
+        yield var_name, var_block, block_offset
+
+
 def _parse_terraform_variables(file_path: str) -> list[dict[str, Any]]:
     """Parse Terraform `variables.tf` file. Marker-Fehler einzelner
     Variablen werden im Variable-Payload als ``markerError`` mitgesendet
@@ -1084,12 +1130,7 @@ def _parse_terraform_variables(file_path: str) -> list[dict[str, Any]]:
         content = f.read()
 
     variables = []
-    # Regex to match variable blocks: variable "name" { ... }
-    pattern = r'variable\s+"([^"]+)"\s*\{([^}]+)\}'
-
-    for match in re.finditer(pattern, content, re.DOTALL):
-        var_name = match.group(1)
-        var_block = match.group(2)
+    for var_name, var_block, block_offset in _iter_variable_blocks(content):
         # Filter: users und image_name rauslassen
         if var_name == "users" or var_name == "image_name":
             continue
@@ -1106,7 +1147,7 @@ def _parse_terraform_variables(file_path: str) -> list[dict[str, Any]]:
         variables.append(_parse_one_variable(
             var_name=var_name,
             var_block=var_block,
-            var_block_offset=match.start(),
+            var_block_offset=block_offset,
             file_content=content,
             file_label="terraform/variables.tf",
             source="terraform",
@@ -1128,19 +1169,14 @@ def _parse_packer_variables(file_path: str, template_key: str = "default") -> li
         content = f.read()
 
     variables = []
-    # Packer uses similar syntax: variable "name" { ... }
-    pattern = r'variable\s+"([^"]+)"\s*\{([^}]+)\}'
-
-    for match in re.finditer(pattern, content, re.DOTALL):
-        var_name = match.group(1)
-        var_block = match.group(2)
+    for var_name, var_block, block_offset in _iter_variable_blocks(content):
         # Filter: image_name rauslassen
         if var_name == "image_name":
             continue
         var_info = _parse_one_variable(
             var_name=var_name,
             var_block=var_block,
-            var_block_offset=match.start(),
+            var_block_offset=block_offset,
             file_content=content,
             file_label=f"packer/{template_key}/variables.pkr.hcl"
             if template_key != "default"
