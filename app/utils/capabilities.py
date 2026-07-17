@@ -5,13 +5,12 @@ questions. Every router endpoint that goes beyond a plain role check
 should reach for a ``can_*`` (boolean) or ``ensure_*`` (raises) helper
 here instead of poking at ``user.role`` directly.
 
-Phase 1 contract:
-    The functions here must mirror the *current* gates exactly so the
-    refactor is a pure code-shape change with no observable behavior
-    difference. Tightenings called for by the plan (e.g. removing the
-    teacher bypass on app edit/delete, scoping course-teacher rights)
-    land in later phases — those spots are marked with explicit
-    ``# Phase 1: ...`` comments below.
+Scope:
+    The gates have moved past the initial behavior-preserving extraction:
+    the teacher bypass on app edit/delete has been removed and
+    course-teacher rights are now scoped through the ``course_teachers``
+    join table (see the ``is_course_teacher*`` and ``can_view_*`` helpers
+    below). Individual functions document the rule they enforce.
 
 Conventions:
     - ``can_<verb>_<resource>(user, ..., *, db=None) -> bool`` answers
@@ -304,17 +303,7 @@ def is_course_teacher(user: User, course: Course, db: Session) -> bool:
     the join table — the role gate stays primary so a misconfigured
     backfill can't silently grant a student teacher rights.
     """
-    if user.role != UserRole.TEACHER:
-        return False
-    row = (
-        db.query(CourseTeacher)
-        .filter(
-            CourseTeacher.courseId == course.courseId,
-            CourseTeacher.userId == user.userId,
-        )
-        .first()
-    )
-    return row is not None
+    return is_course_teacher_id(user, course.courseId, db)
 
 
 def is_course_teacher_id(user: User, course_id: UUID, db: Session) -> bool:

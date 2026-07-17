@@ -1,19 +1,19 @@
 """
-Read-API für die OpenStack-Resourcen des aufrufenden Users.
+Read API for the OpenStack resources of the calling user.
 
-Wird vom Wizard genutzt, damit der User nicht mehr UUIDs aus dem
-Horizon-Dashboard kopieren muss. Jedes Endpoint:
+Used by the wizard so the user no longer has to copy UUIDs from the
+Horizon dashboard. Each endpoint:
 
-- Authentifiziert via Keycloak-Token
-- Holt eine OpenStack-Connection aus dem Service-Layer (per-Request)
-- Cacht die Antwort 60 s prozesslokal (siehe ``services/openstack_client``)
-- Reduziert das SDK-Objekt auf ein flaches Dict — nur die Felder, die
-  das Frontend zur Anzeige + Auswahl braucht. Wir wollen keine SDK-
-  Struktur leaken (sensitive Felder, ungewollte Größe).
+- Authenticates via Keycloak token
+- Obtains an OpenStack connection from the service layer (per-request)
+- Caches the response 60 s process-locally (see ``services/openstack_client``)
+- Reduces the SDK object to a flat dict — only the fields that the
+  frontend needs for display + selection. We do not want to leak SDK
+  structure (sensitive fields, unwanted size).
 
-Fehler-Strategie: 502 für OpenStack-side Failures (kein 500 — das ist
-„Backend-Bug" reserviert). Frontend rendert dann ein Banner „OpenStack
-nicht erreichbar, ID manuell eingeben". 412, falls Credentials fehlen.
+Error strategy: 502 for OpenStack-side failures (no 500 — that is
+reserved for "backend bug"). The frontend then renders a banner
+"OpenStack not reachable, enter ID manually". 412 if credentials are missing.
 """
 
 from __future__ import annotations
@@ -39,15 +39,15 @@ router = APIRouter()
 # ----------------------------------------------------------------
 def _safe_get(obj: Any, *names: str, default: Any = None) -> Any:
     """
-    SDK-Objekte sind teilweise dict-artig, teilweise Property-Objekte.
-    Wir versuchen alle übergebenen Namen der Reihe nach.
+    SDK objects are partly dict-like, partly property objects.
+    We try all passed names in order.
     """
     for n in names:
         try:
             v = getattr(obj, n, None)
             if v is not None:
                 return v
-        except Exception:  # noqa: BLE001 — manche Properties werfen lazy
+        except Exception:  # noqa: BLE001 — some properties raise lazily
             continue
     return default
 
@@ -59,8 +59,8 @@ def _list_with_oserror(
     fetch_fn,
 ) -> list[dict]:
     """
-    Wrapper, der ``fetch_fn`` über den TTL-Cache laufen lässt und
-    OpenStack-Exceptions in 502er übersetzt.
+    Wrapper that runs ``fetch_fn`` through the TTL cache and
+    translates OpenStack exceptions into 502s.
     """
     try:
         return openstack_client.cached_list(
@@ -90,9 +90,9 @@ def refresh_cache(
     current_user: User = Depends(get_current_user_keycloak),
 ):
     """
-    Cache-Bust für den aufrufenden User. Bei einem Klick auf den
-    "Aktualisieren"-Knopf neben einem Picker — der User hat gerade
-    in Horizon eine neue Resource angelegt und will sie sehen.
+    Cache bust for the calling user. Triggered by a click on the
+    "Refresh" button next to a picker — the user has just created a
+    new resource in Horizon and wants to see it.
     """
     removed = openstack_client.invalidate_user(current_user.userId, kind)
     logger.info("Cache invalidated for user %s (kind=%s, %d entries removed)",
@@ -108,10 +108,10 @@ def list_networks(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user_keycloak),
 ):
-    """Listet alle Netzwerke, die der User in seinem Project sieht.
+    """Lists all networks that the user can see in their project.
 
-    ``shared`` und ``router_external`` werden mitgegeben, damit das
-    Frontend „External Network"-Hinweise rendern kann.
+    ``shared`` and ``router_external`` are included so the frontend can
+    render "External Network" hints.
     """
     def fetch() -> list[dict]:
         with openstack_client.user_connection(db, current_user) as conn:
@@ -131,7 +131,7 @@ def list_networks(
 
 
 # ----------------------------------------------------------------
-# Subnets — optional gefiltert nach Network
+# Subnets — optionally filtered by network
 # ----------------------------------------------------------------
 @router.get("/subnets")
 def list_subnets(
@@ -140,10 +140,10 @@ def list_subnets(
     current_user: User = Depends(get_current_user_keycloak),
 ):
     """
-    Mit ``network_id``: Subnets dieses Netzes. Ohne: alle Subnets im
-    Project. Filter geht serverseitig (OpenStack-API), nicht erst nach
-    dem Cache — sonst hätten wir pro Network einen separaten Cache-Key,
-    und der unfilterte Liste-Cache würde nie helfen.
+    With ``network_id``: subnets of that network. Without: all subnets in
+    the project. Filtering happens server-side (OpenStack API), not only
+    after the cache — otherwise we would have a separate cache key per
+    network, and the unfiltered list cache would never help.
     """
     filters: dict[str, Any] = {}
     if network_id:
@@ -178,9 +178,9 @@ def list_flavors(
     current_user: User = Depends(get_current_user_keycloak),
 ):
     """
-    Compute-Flavors mit den drei Spec-Feldern, die der User wirklich
-    will (CPU/RAM/Disk). ``is_public=False`` bedeutet privat — wir
-    geben es trotzdem aus, das Frontend kann eine Notiz rendern.
+    Compute flavors with the three spec fields the user really wants
+    (CPU/RAM/Disk). ``is_public=False`` means private — we still emit
+    it, the frontend can render a note.
     """
     def fetch() -> list[dict]:
         with openstack_client.user_connection(db, current_user) as conn:
@@ -213,9 +213,9 @@ def list_images(
     current_user: User = Depends(get_current_user_keycloak),
 ):
     """
-    Default ``status=active`` — wir wollen nicht „queued" oder „deleted"
-    Images im Picker zeigen. ``status=all`` für Power-User, die wirklich
-    alles sehen wollen.
+    Default ``status=active`` — we do not want to show "queued" or
+    "deleted" images in the picker. ``status=all`` for power users who
+    really want to see everything.
     """
     filters = {"status": status_filter}
 
@@ -248,9 +248,9 @@ def list_keypairs(
     current_user: User = Depends(get_current_user_keycloak),
 ):
     """
-    SSH-Keypairs des Users. Hier ist die Identität immer der ``name``,
-    nie die ID — Keystone-Keypairs haben zwar IDs aber Terraform-Module
-    nutzen den Namen.
+    SSH keypairs of the user. Here the identity is always the ``name``,
+    never the ID — Keystone keypairs do have IDs but Terraform modules
+    use the name.
     """
     def fetch() -> list[dict]:
         with openstack_client.user_connection(db, current_user) as conn:
@@ -259,8 +259,8 @@ def list_keypairs(
                     "name": _safe_get(k, "name") or "",
                     "fingerprint": _safe_get(k, "fingerprint") or "",
                     "type": _safe_get(k, "type") or "ssh",
-                    # ``id`` ist beim Keypair gleich Name — wir doppeln das
-                    # bewusst, damit der Picker einheitlich ``id`` lesen kann.
+                    # ``id`` equals the name for a keypair — we duplicate this
+                    # intentionally so the picker can uniformly read ``id``.
                     "id": _safe_get(k, "name") or "",
                 }
                 for k in conn.compute.keypairs()
@@ -300,9 +300,9 @@ def list_floating_ip_pools(
     current_user: User = Depends(get_current_user_keycloak),
 ):
     """
-    Es gibt in OpenStack keine eigene ``Pool``-Resource — Pools sind
-    Networks mit ``router:external = true``. Terraform-Module erwarten
-    meist den **Namen** des External-Networks.
+    There is no dedicated ``Pool`` resource in OpenStack — pools are
+    networks with ``router:external = true``. Terraform modules usually
+    expect the **name** of the external network.
     """
     def fetch() -> list[dict]:
         with openstack_client.user_connection(db, current_user) as conn:
@@ -330,9 +330,9 @@ def list_volumes(
     current_user: User = Depends(get_current_user_keycloak),
 ):
     """
-    Cinder-Volumes. ``status`` filtert das Frontend selbst, falls nötig
-    — wir geben alle aus, weil ein User durchaus an einem
-    ``in-use`` Volume eine zweite Instance anhängen kann.
+    Cinder volumes. The frontend filters ``status`` itself if needed
+    — we emit all of them, because a user can well attach a second
+    instance to an ``in-use`` volume.
     """
     def fetch() -> list[dict]:
         with openstack_client.user_connection(db, current_user) as conn:
@@ -387,8 +387,8 @@ def list_availability_zones(
     current_user: User = Depends(get_current_user_keycloak),
 ):
     """
-    AZs sind pro Service unterschiedlich. Default: Compute (Nova), weil
-    das der häufigste Use-Case ist (VM-Placement).
+    AZs differ per service. Default: compute (Nova), because that is
+    the most common use case (VM placement).
     """
     filters = {"service": service}
 
@@ -411,7 +411,7 @@ def list_availability_zones(
                 if not name:
                     continue
                 out.append({
-                    # AZs haben keine UUID — der Name IST die ID.
+                    # AZs have no UUID — the name IS the ID.
                     "id": name,
                     "name": name,
                     "state": _safe_get(az, "state", "zoneState") or "",

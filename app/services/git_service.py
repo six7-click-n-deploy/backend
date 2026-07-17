@@ -20,18 +20,18 @@ logger = logging.getLogger(__name__)
 class GitService:
     """Service for Git operations and release management."""
 
-    # Sparse-Checkout-Allowlist für den Variablen-Scan.
+    # Sparse-checkout allowlist for the variable scan.
     #
-    # Non-Cone-Mode (siehe ``clone_release_vars``): die Einträge sind
-    # ``.gitignore``-Pathspecs. ``packer/`` matcht den gesamten Subtree —
-    # damit holen wir sowohl die Legacy-Layout-Datei
-    # (``packer/variables.pkr.hcl``) als auch das neue Per-Template-
-    # Layout (``packer/<key>/variables.pkr.hcl``) plus die
-    # ``template.pkr.hcl``-Dateien, die ``_discover_packer_templates``
-    # zur Image-Erkennung braucht. ``terraform/variables.tf`` bleibt
-    # eine Punkt-Spezifikation, weil wir aus Terraform nur die
-    # Variablen-Datei brauchen, nicht den Rest (main.tf, outputs.tf,
-    # cloud-init-Templates …).
+    # Non-cone mode (see ``clone_release_vars``): the entries are
+    # ``.gitignore`` pathspecs. ``packer/`` matches the entire subtree —
+    # this fetches both the legacy layout file
+    # (``packer/variables.pkr.hcl``) and the new per-template layout
+    # (``packer/<key>/variables.pkr.hcl``) plus the
+    # ``template.pkr.hcl`` files that ``_discover_packer_templates``
+    # needs for image detection. ``terraform/variables.tf`` stays a
+    # single-file specification because we only need the variables file
+    # from Terraform, not the rest (main.tf, outputs.tf,
+    # cloud-init templates …).
     SPARSE_CHECKOUT_FILES = [
         'terraform/variables.tf',
         'packer/',
@@ -88,14 +88,29 @@ class GitService:
         logger.warning(f"Could not parse git URL: {git_url}")
         return None
 
+    def _request_tags(self, parsed: dict[str, str]) -> requests.Response:
+        """Build and perform the tags request for the parsed repository.
+
+        Constructs the provider-specific tags URL and headers (GitHub vs.
+        GitLab, including auth token handling) and issues the GET request,
+        returning the raw response for the caller to interpret.
+        """
+        if parsed['platform'] == 'github':
+            api_url = f"https://api.github.com/repos/{parsed['owner']}/{parsed['repo']}/tags"
+            headers = {
+                'Authorization': f"token {self.token}",
+                'Accept': 'application/vnd.github.v3+json',
+            }
+        else:  # gitlab
+            project_path = quote(f"{parsed['owner']}/{parsed['repo']}", safe='')
+            api_url = f"https://{parsed['host']}/api/v4/projects/{project_path}/repository/tags"
+            headers = {'PRIVATE-TOKEN': self.token}
+
+        return self._session.get(api_url, headers=headers, timeout=10)
+
     def _fetch_github_tags(self, parsed: dict[str, str]) -> list[dict[str, Any]]:
         """Fetch all tags from GitHub API."""
-        api_url = f"https://api.github.com/repos/{parsed['owner']}/{parsed['repo']}/tags"
-        response = self._session.get(
-            api_url,
-            headers={'Authorization': f"token {self.token}", 'Accept': 'application/vnd.github.v3+json'},
-            timeout=10
-        )
+        response = self._request_tags(parsed)
 
         if response.status_code == 404:
             return []
@@ -130,13 +145,7 @@ class GitService:
 
     def _fetch_gitlab_tags(self, parsed: dict[str, str]) -> list[dict[str, Any]]:
         """Fetch all tags from GitLab API."""
-        project_path = quote(f"{parsed['owner']}/{parsed['repo']}", safe='')
-        api_url = f"https://{parsed['host']}/api/v4/projects/{project_path}/repository/tags"
-        response = self._session.get(
-            api_url,
-            headers={'PRIVATE-TOKEN': self.token},
-            timeout=10
-        )
+        response = self._request_tags(parsed)
 
         if response.status_code == 404:
             return []
@@ -293,25 +302,7 @@ class GitService:
             # Try to fetch tags to verify access
             logger.info(f"Verifying access to {git_url} via {parsed['platform'].upper()} API")
 
-            if parsed['platform'] == 'github':
-                project_path = f"{parsed['owner']}/{parsed['repo']}"
-                api_url = f"https://api.github.com/repos/{project_path}/tags"
-                response = self._session.get(
-                    api_url,
-                    headers={
-                        'Authorization': f'token {self.token}',
-                        'Accept': 'application/vnd.github.v3+json'
-                    },
-                    timeout=10
-                )
-            else:  # gitlab
-                project_path = quote(f"{parsed['owner']}/{parsed['repo']}", safe='')
-                api_url = f"https://{parsed['host']}/api/v4/projects/{project_path}/repository/tags"
-                response = self._session.get(
-                    api_url,
-                    headers={'PRIVATE-TOKEN': self.token},
-                    timeout=10
-                )
+            response = self._request_tags(parsed)
 
             if response.status_code == 401:
                 return {
@@ -332,25 +323,7 @@ class GitService:
 
                 # Retry access check after accepting invitation
                 logger.info(f"Invitation accepted, retrying access check for {git_url}")
-                if parsed['platform'] == 'github':
-                    project_path = f"{parsed['owner']}/{parsed['repo']}"
-                    api_url = f"https://api.github.com/repos/{project_path}/tags"
-                    retry_response = self._session.get(
-                        api_url,
-                        headers={
-                            'Authorization': f'token {self.token}',
-                            'Accept': 'application/vnd.github.v3+json'
-                        },
-                        timeout=10
-                    )
-                else:  # gitlab
-                    project_path = quote(f"{parsed['owner']}/{parsed['repo']}", safe='')
-                    api_url = f"https://{parsed['host']}/api/v4/projects/{project_path}/repository/tags"
-                    retry_response = self._session.get(
-                        api_url,
-                        headers={'PRIVATE-TOKEN': self.token},
-                        timeout=10
-                    )
+                retry_response = self._request_tags(parsed)
 
                 if retry_response.status_code >= 400:
                     return {

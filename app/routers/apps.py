@@ -1,4 +1,6 @@
 import contextlib
+import difflib
+import json
 import logging
 import os
 import re
@@ -32,6 +34,8 @@ from app.utils.capabilities import (
 )
 from app.utils.keycloak_auth import get_current_user_keycloak
 
+logger = logging.getLogger(__name__)
+
 
 def _serialize_app(app):
     """Replace ``app.image`` (bytes) with the data-URL form in-place.
@@ -49,6 +53,20 @@ def _serialize_app(app):
     if isinstance(raw_bytes, (bytes, memoryview, bytearray)):
         app.image = build_image_data_url(bytes(raw_bytes), getattr(app, "image_mime", None))
     return app
+
+
+def _version_tag(version) -> str:
+    """Extract the tag string from a git version entry.
+
+    ``git_service.get_versions`` yields either a plain tag string or a
+    dict carrying the tag under one of ``version`` / ``releaseTag`` /
+    ``tag``. Returns ``""`` when nothing matches, so callers can treat
+    the result uniformly (empty string is falsy and never a valid tag).
+    """
+    if isinstance(version, str):
+        return version
+    return version.get("version") or version.get("releaseTag") or version.get("tag", "")
+
 
 router = APIRouter()
 
@@ -327,6 +345,437 @@ class MarkerError(ValueError):
         self.code = code
 
 
+def _parse_var_scope(var_name: str, slot: str | None) -> str | None:
+    """Validate and normalize the ``var_scope`` slot of a marker.
+
+    Returns ``None`` for an empty slot; raises ``MarkerError`` for an
+    unknown token (with a closest-match hint when one exists).
+    """
+    if slot is None or slot == "":
+        return None
+    rs = slot.lower()
+    if rs in _VAR_SCOPES:
+        return rs
+    suggestion = _closest_match(rs, _VAR_SCOPES)
+    hint = f"; meintest du '{suggestion}'?" if suggestion else ""
+    raise MarkerError(
+        var_name,
+        f"ungültiger var_scope '{slot}'{hint} — erwartet "
+        f"{sorted(_VAR_SCOPES)}",
+        code="MARKER_INVALID_VAR_SCOPE",
+    )
+
+
+def _forbid_packer_team_user_scope(var_name: str, source: str, var_scope: str | None) -> None:
+    """Reject ``team``/``user`` scopes on packer variables.
+
+    Packer builds ONE image shared by all later VMs/teams/users, so a
+    per-team/per-user value would have no effect. Called from both the
+    scope-only and resource marker paths.
+    """
+    if source == "packer" and var_scope in ("team", "user"):
+        raise MarkerError(
+            var_name,
+            f"packer-Variablen unterstützen nur ``var_scope = all``; "
+            f"angegeben: '{var_scope}'. Begründung: Packer baut EIN "
+            f"Image, das von allen späteren VMs/Teams/Usern geteilt "
+            f"wird — ein Per-Team-Wert hätte keine Wirkung.",
+            code="MARKER_PACKER_SCOPE_FORBIDDEN",
+        )
+
+
+def _reject_malformed_markers(var_name: str, description: str) -> None:
+    """Raise ``MarkerError`` for the malformed-marker shapes a plain
+    regex match would silently swallow.
+
+    Covers: too many segments, whitespace between segments, and a comma
+    used as a slot separator (the only valid separator is ``|``).
+    """
+    # Six+ segments (i.e. five+ colons after ``@openstack:``) are never
+    # legitimate. Check this first, BEFORE the main regex (which stops
+    # after four slots) even notices.
+    if _TOO_MANY_SEGMENTS_RE.search(description):
+        raise MarkerError(
+            var_name,
+            "marker hat zu viele Segmente — erlaubt: "
+            "@openstack:<type>[:<mode>][:<multi>][:<var_scope>]",
+            code="MARKER_TOO_MANY_SEGMENTS",
+        )
+
+    matches = list(_MARKER_RE.finditer(description))
+    if not matches:
+        # Strict hard-fail path: someone typed ``@openstack:`` but our
+        # grammar doesn't match — e.g. because of whitespace, a dash,
+        # ``=``, or a slash. Silently ignoring it would hide the bug
+        # (the variable renders as free-text and nobody notices). Fail
+        # loudly instead.
+        if _BAD_PREFIX_RE.search(description):
+            raise MarkerError(
+                var_name,
+                "marker konnte nicht geparst werden — erlaubt ist nur "
+                "``@openstack:<type>[:<mode>][:<multi>][:<var_scope>]`` mit "
+                "Doppelpunkten als Trenner und ohne Whitespace zwischen "
+                "den Segmenten",
+                code="MARKER_UNPARSEABLE",
+            )
+        return
+
+    # Bug #12 — whitespace between marker segments silently truncates:
+    # ``_MARKER_RE`` stops at the first whitespace, so
+    # ``@openstack:flavor :id`` is only parsed as ``@openstack:flavor``
+    # and the ``:id`` slot drops out unnoticed. For EACH match we check
+    # whether a ``<whitespace>:<token>`` continuation follows the span
+    # and raise a clear error instead of swallowing the typo.
+    for m in matches:
+        tail = description[m.end():]
+        if _MARKER_WHITESPACE_CONT_RE.match(tail):
+            raise MarkerError(
+                var_name,
+                "marker enthält Whitespace zwischen den Segmenten — "
+                "schreibe ihn ohne Leerzeichen (z.B. "
+                "``@openstack:flavor:id:multi`` statt "
+                "``@openstack:flavor :id :multi``)",
+                code="MARKER_WHITESPACE",
+            )
+
+    # A comma as a slot separator is a common typo — the only allowed
+    # separator is ``|`` (e.g. ``@openstack:file:all:pdf|docx``).
+    # ``_MARKER_RE`` matches only up to the comma, so ``,docx`` would
+    # linger as silent junk in the description. We detect
+    # ``<match>,<token>`` explicitly and raise a clear error so the app
+    # author sees the real cause instead of a cryptic "extension
+    # missing" error.
+    for m in matches:
+        tail = description[m.end():]
+        if _MARKER_COMMA_CONT_RE.match(tail):
+            raise MarkerError(
+                var_name,
+                "ungültiger Endungsfilter mit Komma — marker-Slots werden "
+                "mit ``|`` getrennt, nicht mit Komma (z.B. "
+                "``@openstack:file:all:pdf|docx`` statt "
+                "``@openstack:file:all:pdf,docx``)",
+                code="MARKER_FILE_INVALID_EXTENSIONS",
+            )
+
+
+def _select_marker(var_name: str, description: str):
+    """Pick the effective marker match from the description.
+
+    The first marker with a KNOWN type OR an empty type slot (= a
+    scope-only marker) wins; markers with an unknown, non-empty type are
+    skipped (tolerated). Returns the chosen
+    ``(match, raw_type, raw_mode, raw_multi, raw_scope)`` tuple, or
+    ``None`` when the description carries no marker at all. Raises
+    ``MarkerError`` when every marker had an unknown type.
+    """
+    matches = list(_MARKER_RE.finditer(description))
+    if not matches:
+        return None
+
+    first_unknown: tuple[str, str] | None = None  # (raw_type, suggestion)
+    for m in matches:
+        raw_type = (m.group(1) or "")
+        os_type_candidate = raw_type.lower()
+        if raw_type == "" or os_type_candidate in _OS_TYPES:
+            return (m, raw_type, m.group(2), m.group(3), m.group(4))
+        if first_unknown is None:
+            first_unknown = (raw_type, _closest_match(os_type_candidate, _OS_TYPES) or "")
+
+    # There were markers, but all with unknown types. Hard-fail with a
+    # hint pointing at the first — that is very likely the author's typo.
+    raw_type, suggestion = first_unknown  # type: ignore[misc]
+    hint = f"; meintest du '{suggestion}'?" if suggestion else ""
+    raise MarkerError(
+        var_name,
+        f"unbekannter resource-type '{raw_type}'{hint} — "
+        f"erwartet: {sorted(_OS_TYPES)}",
+        code="MARKER_UNKNOWN_OS_TYPE",
+    )
+
+
+def _parse_scope_only_marker(
+    var_name: str, source: str, raw_mode: str | None, raw_multi: str | None, raw_scope: str | None
+):
+    """Parse a scope-only marker (empty type slot, e.g. ``@openstack:::team``).
+
+    Such a marker has no type/mode/multi — only scope meaning. When the
+    author uses a short form (``@openstack::team`` with two slots instead
+    of four), ``team`` lands in the mode slot rather than the fourth. We
+    take the first non-empty slot of mode/multi/scope and accept it as
+    long as it is a var_scope token — this makes marker spelling robust
+    against the number of colons. Several occupied slots at once remain
+    an error (ambiguous).
+    """
+    candidates = [s for s in (raw_mode, raw_multi, raw_scope) if s not in (None, "")]
+    if len(candidates) > 1:
+        raise MarkerError(
+            var_name,
+            "leerer type-slot ist nur in Kombination mit ``var_scope`` "
+            "erlaubt (z.B. ``@openstack:::team``); mehrere belegte "
+            "Slots sind hier nicht zulässig",
+            code="MARKER_EMPTY_TYPE_AMBIGUOUS",
+        )
+    var_scope = _parse_var_scope(var_name, candidates[0] if candidates else None)
+    if var_scope is None:
+        raise MarkerError(
+            var_name,
+            "leerer Marker — entweder einen resource-type angeben "
+            "(z.B. ``@openstack:flavor``) oder einen var_scope "
+            "(z.B. ``@openstack:::team``)",
+            code="MARKER_EMPTY",
+        )
+    _forbid_packer_team_user_scope(var_name, source, var_scope)
+    return (None, None, None, None, var_scope, None)
+
+
+def _parse_file_marker(
+    var_name: str, source: str, raw_mode: str | None, raw_multi: str | None, raw_scope: str | None
+):
+    """Parse a ``@openstack:file`` marker.
+
+    File markers have their own slot semantics: the mode slot carries the
+    scope (``all``/``team``/``user``) and the multi slot carries the
+    MANDATORY extension filter (``pdf`` or ``pdf|docx``). Handled
+    separately so the generic mode/multi logic stays untouched.
+    """
+    if source == "packer":
+        # Packer builds an image — file variables would never reach the
+        # build (the files path today merges hard-coded into
+        # ``userInputVar.terraform``). Rather than a silent trap: a
+        # marker error.
+        raise MarkerError(
+            var_name,
+            "``@openstack:file`` ist in Packer-Variablen nicht "
+            "unterstützt — Dateien werden ausschließlich im "
+            "Terraform-Pfad zugestellt",
+            code="MARKER_FILE_PACKER_FORBIDDEN",
+        )
+
+    file_scope: str | None = None
+    if raw_mode is not None and raw_mode != "":
+        rs = raw_mode.lower()
+        if rs in _FILE_SCOPES:
+            file_scope = rs
+        else:
+            scope_suggestion = _closest_match(rs, _FILE_SCOPES)
+            hint = f"; meintest du '{scope_suggestion}'?" if scope_suggestion else ""
+            raise MarkerError(
+                var_name,
+                f"ungültiger file-scope '{raw_mode}'{hint} — erwartet "
+                f"{sorted(_FILE_SCOPES)}",
+                code="MARKER_INVALID_FILE_SCOPE",
+            )
+
+    # The multi slot is now the mandatory extensions filter. An empty
+    # slot is an error — file variables need an explicit allow-list so
+    # the wizard can filter in the ``accept`` attribute and the backend
+    # upload has a clear validation path.
+    #
+    # Regex detail: for values with ``|`` (e.g. ``pdf|docx``) the content
+    # lands in the fourth slot instead of the third, because the third
+    # slot does not accept a pipe. We accept that transparently — both
+    # positions are checked for the extensions content.
+    exts_slot: str | None = None
+    if raw_multi not in (None, ""):
+        exts_slot = raw_multi
+        if raw_scope not in (None, ""):
+            raise MarkerError(
+                var_name,
+                f"@openstack:file akzeptiert keinen fünften Slot "
+                f"(angegeben: '{raw_scope}') — der Scope steht im "
+                f"dritten Slot (z.B. ``@openstack:file:user:pdf``)",
+                code="MARKER_FILE_EXTRA_SLOT",
+            )
+    elif raw_scope not in (None, ""):
+        exts_slot = raw_scope
+    if exts_slot is None:
+        raise MarkerError(
+            var_name,
+            "``@openstack:file`` braucht einen Endungsfilter im "
+            "vierten Slot, z.B. ``@openstack:file:all:pdf`` oder "
+            "``@openstack:file:user:pdf|docx``",
+            code="MARKER_FILE_MISSING_EXTENSIONS",
+        )
+    exts_raw = exts_slot.lower()
+    if not _FILE_EXTENSIONS_RE.match(exts_raw):
+        raise MarkerError(
+            var_name,
+            f"ungültiger Endungsfilter '{exts_slot}' — erlaubt sind "
+            f"alphanumerische Endungen, mehrere getrennt mit '|' "
+            f"(z.B. ``pdf|docx``)",
+            code="MARKER_FILE_INVALID_EXTENSIONS",
+        )
+    file_exts = exts_raw.split("|")
+
+    return ("file", None, None, file_scope, file_scope, file_exts)
+
+
+def _parse_marker_mode(var_name: str, os_type: str, raw_mode: str | None) -> str | None:
+    """Parse the mode slot (``id``/``name``) of a resource marker.
+
+    Empty slot → ``None`` (defaults applied by the caller). Raises with a
+    targeted hint when the author placed a multi-flag or a var_scope into
+    the mode slot, or used an unknown token.
+    """
+    if raw_mode is None:
+        return None
+    rm = raw_mode.lower()
+    if rm == "":
+        # An empty slot is allowed: ``@openstack:flavor::multi`` means
+        # "mode = default, multi = multi". We leave ``mode = None``; the
+        # defaults are applied by the caller.
+        return None
+    if rm in ("id", "name"):
+        return rm
+    if rm in ("multi", "list", "single"):
+        # Common author mistake: the user wanted to set ``:multi`` but
+        # didn't leave the mode slot empty. Instead of a generic "invalid
+        # mode" message, show the correct marker.
+        raise MarkerError(
+            var_name,
+            f"'{raw_mode}' ist ein multi-Flag, nicht ein Mode — "
+            f"schreibe den Marker mit leerem Mode-Slot, z.B. "
+            f"``@openstack:{os_type}::{rm}``",
+            code="MARKER_MULTI_IN_MODE_SLOT",
+        )
+    if rm in _VAR_SCOPES:
+        # var-scope-in-mode-slot: same logic as multi-in-mode-slot. The
+        # app author wanted to set the ``var_scope`` but didn't leave the
+        # middle slots empty (``@openstack:flavor:team`` instead of
+        # ``@openstack:flavor:::team``). Instead of a cryptic "invalid
+        # mode" message, show the correct marker.
+        raise MarkerError(
+            var_name,
+            f"'{raw_mode}' ist ein var_scope, nicht ein Mode — "
+            f"schreibe den Marker mit leerem Mode-/Multi-Slot, z.B. "
+            f"``@openstack:{os_type}:::{rm}``",
+            code="MARKER_SCOPE_IN_MODE_SLOT",
+        )
+    mode_suggestion = _closest_match(rm, {"id", "name"})
+    hint = f"; meintest du '{mode_suggestion}'?" if mode_suggestion else ""
+    raise MarkerError(
+        var_name,
+        f"ungültiger mode '{raw_mode}'{hint} — erwartet 'id' oder 'name'",
+        code="MARKER_INVALID_MODE",
+    )
+
+
+def _parse_marker_multi(var_name: str, raw_multi: str | None) -> bool | None:
+    """Parse the multi slot (``multi``/``list``/``single``) of a marker.
+
+    ``list`` is a synonym for ``multi``. Empty slot → ``None``.
+    """
+    if raw_multi is None:
+        return None
+    mm = raw_multi.lower()
+    if mm == "":
+        return None
+    if mm in ("multi", "list"):
+        return True
+    if mm == "single":
+        return False
+    multi_suggestion = _closest_match(mm, {"multi", "list", "single"})
+    hint = f"; meintest du '{multi_suggestion}'?" if multi_suggestion else ""
+    raise MarkerError(
+        var_name,
+        f"ungültiger multi-Flag '{raw_multi}'{hint} — erwartet "
+        "'multi', 'list' oder 'single'",
+        code="MARKER_INVALID_MULTI",
+    )
+
+
+def _collection_check_type(type_lower: str, var_scope: str | None) -> str:
+    """Return the HCL type to run the collection check against.
+
+    Bug #1 — ``:multi:team`` unreachable: for scope team/user the wizard
+    contract requires a ``map(...)`` HCL type. A naive ``is_collection``
+    check would fail (``map(list(string))`` starts with ``map(``) even
+    though the inner element type is a real collection. For scoped
+    markers we unwrap the outer ``map(...)`` and check the INNER type
+    against the multi expectation.
+    """
+    if var_scope not in ("team", "user") or not type_lower.startswith("map("):
+        return type_lower
+    # Bracket-balance the inner part out of ``map(...)``. Naive
+    # ``[4:-1]`` slicing isn't enough because nested ``map(map(...))`` is
+    # legitimate — we walk the characters once and count parentheses.
+    depth = 0
+    start = type_lower.find("(")
+    inner_end = -1
+    for i in range(start, len(type_lower)):
+        ch = type_lower[i]
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+            if depth == 0:
+                inner_end = i
+                break
+    if inner_end > start + 1:
+        return type_lower[start + 1:inner_end].strip()
+    return type_lower
+
+
+def _check_multi_type_conflict(
+    var_name: str, var_type: str, type_for_collection_check: str, multi: bool | None
+) -> None:
+    """Cross-check the marker's ``:multi``/``:single`` against the HCL type.
+
+    ``list``/``set``/``tuple`` are the collection-capable picker types;
+    for these ``:multi`` is natural. ``map``/``object`` are technical
+    collections the picker can't drive, so they're treated like
+    single-strings for conflict detection.
+    """
+    is_collection_type = (
+        type_for_collection_check.startswith(("list(", "set(", "tuple("))
+        or type_for_collection_check in ("list", "set")
+    )
+    if multi is True and not is_collection_type and type_for_collection_check not in ("", "string"):
+        # ``string`` is let through because many apps declare
+        # ``type = string`` without a multi-marker and the frontend then
+        # delivers CSV anyway. But e.g. ``type = number`` or
+        # ``type = map(...)`` with ``:multi`` is clearly contradictory.
+        raise MarkerError(
+            var_name,
+            f"marker deklariert ':multi', aber HCL-Type ist '{var_type}' "
+            "— erlaubt sind nur ``string``, ``list(...)``, ``set(...)`` "
+            "und ``tuple(...)``",
+            code="MARKER_MULTI_TYPE_CONFLICT",
+        )
+    if multi is False and is_collection_type:
+        raise MarkerError(
+            var_name,
+            f"marker deklariert ':single', aber HCL-Type ist '{var_type}' "
+            "(eine list/set/tuple-Kollektion) — fixe einen der beiden",
+            code="MARKER_SINGLE_TYPE_CONFLICT",
+        )
+
+
+def _parse_resource_marker(
+    var_name: str,
+    var_type: str,
+    source: str,
+    os_type: str,
+    raw_mode: str | None,
+    raw_multi: str | None,
+    raw_scope: str | None,
+):
+    """Parse a generic (non-file) resource marker: mode, multi, scope."""
+    mode = _parse_marker_mode(var_name, os_type, raw_mode)
+    multi = _parse_marker_multi(var_name, raw_multi)
+
+    type_lower = (var_type or "").strip().lower()
+    # Parse the scope once; reused for both the inner-type collection
+    # lookup (Bug #1) and the returned value so the same error can't fire
+    # twice.
+    var_scope = _parse_var_scope(var_name, raw_scope)
+    type_for_collection_check = _collection_check_type(type_lower, var_scope)
+    _check_multi_type_conflict(var_name, var_type, type_for_collection_check, multi)
+
+    _forbid_packer_team_user_scope(var_name, source, var_scope)
+    return (os_type, mode, multi, None, var_scope, None)
+
+
 def _parse_marker(
     var_name: str, var_type: str, description: str, source: str = "terraform"
 ) -> tuple[str | None, str | None, bool | None, str | None, str | None, list[str] | None]:
@@ -370,387 +819,33 @@ def _parse_marker(
     * ``file_exts``   — nur für file gesetzt: Liste erlaubter Endungen,
                         z.B. ``["pdf", "docx"]``. Reihenfolge stabil
                         gemäß Marker-Reihenfolge.
+
+    The heavy lifting is delegated to focused helpers: this function only
+    orchestrates the pipeline (reject malformed → select marker →
+    dispatch to the scope-only / file / generic resource parser).
     """
     if not description:
         return (None, None, None, None, None, None)
 
-    # Sechs+ Segmente (also fünf+ Doppelpunkte nach ``@openstack:``) sind
-    # nie legitim. Schnellt zuerst durch, BEVOR der Haupt-Regex (der
-    # nach 4 Slots aufhört) das gar nicht mitkriegt.
-    if _TOO_MANY_SEGMENTS_RE.search(description):
-        raise MarkerError(
-            var_name,
-            "marker hat zu viele Segmente — erlaubt: "
-            "@openstack:<type>[:<mode>][:<multi>][:<var_scope>]",
-            code="MARKER_TOO_MANY_SEGMENTS",
-        )
+    _reject_malformed_markers(var_name, description)
 
-    matches = list(_MARKER_RE.finditer(description))
-    if not matches:
-        # Strikter Hard-Fail-Pfad: jemand hat ``@openstack:`` getippt,
-        # aber unsere Grammatik passt nicht — z.B. wegen Whitespace,
-        # Bindestrich, ``=``, Slash. Stilles Ignorieren würde den Bug
-        # verstecken (Variable rendert als Free-Text und niemand merkt
-        # was). Lieber laut.
-        if _BAD_PREFIX_RE.search(description):
-            raise MarkerError(
-                var_name,
-                "marker konnte nicht geparst werden — erlaubt ist nur "
-                "``@openstack:<type>[:<mode>][:<multi>][:<var_scope>]`` mit "
-                "Doppelpunkten als Trenner und ohne Whitespace zwischen "
-                "den Segmenten",
-                code="MARKER_UNPARSEABLE",
-            )
-        return (None, None, None, None, None, None)
-
-    # Bug #12 — Whitespace zwischen Marker-Segmenten silently truncate:
-    # ``_MARKER_RE`` stoppt am ersten Whitespace, also wird
-    # ``@openstack:flavor :id`` nur als ``@openstack:flavor`` geparst —
-    # der ``:id``-Slot fällt unbemerkt unter den Tisch. Wir prüfen für
-    # JEDEN Match, ob unmittelbar nach dem Span ein
-    # ``<whitespace>:<token>``-Fortsetzungsversuch steht und werfen
-    # einen klaren Fehler, statt den Tippfehler zu schlucken.
-    for m in matches:
-        tail = description[m.end():]
-        if _MARKER_WHITESPACE_CONT_RE.match(tail):
-            raise MarkerError(
-                var_name,
-                "marker enthält Whitespace zwischen den Segmenten — "
-                "schreibe ihn ohne Leerzeichen (z.B. "
-                "``@openstack:flavor:id:multi`` statt "
-                "``@openstack:flavor :id :multi``)",
-                code="MARKER_WHITESPACE",
-            )
-
-    # Komma als Slot-Trenner ist ein häufiger Tippfehler — der einzig
-    # erlaubte Trenner ist ``|`` (z.B. ``@openstack:file:all:pdf|docx``).
-    # ``_MARKER_RE`` matcht nur bis zum Komma, also bliebe ``,docx`` als
-    # stiller Rest-Müll in der Description. Wir erkennen ``<match>,<token>``
-    # explizit und werfen einen klaren Fehler — der App-Autor sieht die
-    # echte Ursache statt eines kryptischen „extension fehlt"-Fehlers.
-    for m in matches:
-        tail = description[m.end():]
-        if _MARKER_COMMA_CONT_RE.match(tail):
-            raise MarkerError(
-                var_name,
-                "ungültiger Endungsfilter mit Komma — marker-Slots werden "
-                "mit ``|`` getrennt, nicht mit Komma (z.B. "
-                "``@openstack:file:all:pdf|docx`` statt "
-                "``@openstack:file:all:pdf,docx``)",
-                code="MARKER_FILE_INVALID_EXTENSIONS",
-            )
-
-    # Erster Marker mit BEKANNTEM Type ODER mit leerem Type-Slot
-    # (= nur-var_scope-Marker) gewinnt. Marker mit unbekanntem,
-    # nicht-leerem Type werden übersprungen (toleriert).
-    first_unknown: tuple[str, str] | None = None  # (raw_type, suggestion)
-    chosen = None
-    for m in matches:
-        raw_type = (m.group(1) or "")
-        os_type_candidate = raw_type.lower()
-        if raw_type == "" or os_type_candidate in _OS_TYPES:
-            chosen = (m, raw_type, m.group(2), m.group(3), m.group(4))
-            break
-        if first_unknown is None:
-            first_unknown = (raw_type, _closest_match(os_type_candidate, _OS_TYPES) or "")
-
+    chosen = _select_marker(var_name, description)
     if chosen is None:
-        # Es gab Marker, aber alle mit unbekannten Types. Hartes Fail
-        # mit Hint auf den ersten — das ist mit hoher Wahrscheinlichkeit
-        # der Tippfehler des Autors.
-        raw_type, suggestion = first_unknown  # type: ignore[misc]
-        hint = f"; meintest du '{suggestion}'?" if suggestion else ""
-        raise MarkerError(
-            var_name,
-            f"unbekannter resource-type '{raw_type}'{hint} — "
-            f"erwartet: {sorted(_OS_TYPES)}",
-            code="MARKER_UNKNOWN_OS_TYPE",
-        )
+        return (None, None, None, None, None, None)
 
     _, raw_type, raw_mode, raw_multi, raw_scope = chosen
     os_type: str | None = raw_type.lower() if raw_type else None
 
-    # Hilfs-Parser für den vierten Slot bei non-file-Markern. Wir
-    # ziehen den hoch, damit der File-Zweig später unabhängig davon
-    # entscheiden kann, ob er den Slot als Extensions oder als
-    # var_scope interpretiert.
-    def _parse_var_scope(slot: str | None) -> str | None:
-        if slot is None or slot == "":
-            return None
-        rs = slot.lower()
-        if rs in _VAR_SCOPES:
-            return rs
-        suggestion = _closest_match(rs, _VAR_SCOPES)
-        hint = f"; meintest du '{suggestion}'?" if suggestion else ""
-        raise MarkerError(
-            var_name,
-            f"ungültiger var_scope '{slot}'{hint} — erwartet "
-            f"{sorted(_VAR_SCOPES)}",
-            code="MARKER_INVALID_VAR_SCOPE",
-        )
-
-    # Nur-var_scope-Marker (``@openstack:::team`` oder Varianten mit
-    # weniger Doppelpunkten): kein Type, kein Mode, kein Multi — der
-    # Marker hat ausschließlich Scope-Bedeutung. Wenn der App-Autor
-    # eine kurze Form schreibt (``@openstack::team`` mit zwei statt
-    # vier Slots), landet ``team`` regex-bedingt im Mode-Slot statt im
-    # vierten Slot. Wir picken den ersten nicht-leeren Slot von
-    # mode/multi/scope und akzeptieren ihn, solange das ein
-    # var_scope-Token ist — das macht die Marker-Schreibweise
-    # robuster gegen die Anzahl der Doppelpunkte. Mehrere belegte
-    # Slots gleichzeitig sind weiterhin Fehler (mehrdeutig).
     if os_type is None:
-        candidates = [s for s in (raw_mode, raw_multi, raw_scope) if s not in (None, "")]
-        if len(candidates) > 1:
-            raise MarkerError(
-                var_name,
-                "leerer type-slot ist nur in Kombination mit ``var_scope`` "
-                "erlaubt (z.B. ``@openstack:::team``); mehrere belegte "
-                "Slots sind hier nicht zulässig",
-                code="MARKER_EMPTY_TYPE_AMBIGUOUS",
-            )
-        var_scope = _parse_var_scope(candidates[0] if candidates else None)
-        if var_scope is None:
-            raise MarkerError(
-                var_name,
-                "leerer Marker — entweder einen resource-type angeben "
-                "(z.B. ``@openstack:flavor``) oder einen var_scope "
-                "(z.B. ``@openstack:::team``)",
-                code="MARKER_EMPTY",
-            )
-        if source == "packer" and var_scope in ("team", "user"):
-            raise MarkerError(
-                var_name,
-                f"packer-Variablen unterstützen nur ``var_scope = all``; "
-                f"angegeben: '{var_scope}'. Begründung: Packer baut EIN "
-                f"Image, das von allen späteren VMs/Teams/Usern geteilt "
-                f"wird — ein Per-Team-Wert hätte keine Wirkung.",
-                code="MARKER_PACKER_SCOPE_FORBIDDEN",
-            )
-        return (None, None, None, None, var_scope, None)
+        return _parse_scope_only_marker(var_name, source, raw_mode, raw_multi, raw_scope)
 
-    # File-Marker hat seine eigene Slot-Semantik: der Mode-Slot trägt
-    # den Scope (``all``/``team``/``user``), der Multi-Slot trägt den
-    # PFLICHT-Endungsfilter (``pdf`` oder ``pdf|docx``). Wir handlen
-    # das hier separat, damit die generische Mode/Multi-Logik darunter
-    # unverändert bleibt.
     if os_type == "file":
-        if source == "packer":
-            # Packer baut ein Image — File-Variablen würden im Build
-            # gar nicht ankommen (der Files-Pfad mergt heute hartcodiert
-            # in ``userInputVar.terraform``). Statt einer stillen
-            # Falle: Marker-Fehler.
-            raise MarkerError(
-                var_name,
-                "``@openstack:file`` ist in Packer-Variablen nicht "
-                "unterstützt — Dateien werden ausschließlich im "
-                "Terraform-Pfad zugestellt",
-                code="MARKER_FILE_PACKER_FORBIDDEN",
-            )
+        return _parse_file_marker(var_name, source, raw_mode, raw_multi, raw_scope)
 
-        file_scope: str | None = None
-        if raw_mode is not None and raw_mode != "":
-            rs = raw_mode.lower()
-            if rs in _FILE_SCOPES:
-                file_scope = rs
-            else:
-                scope_suggestion = _closest_match(rs, _FILE_SCOPES)
-                hint = f"; meintest du '{scope_suggestion}'?" if scope_suggestion else ""
-                raise MarkerError(
-                    var_name,
-                    f"ungültiger file-scope '{raw_mode}'{hint} — erwartet "
-                    f"{sorted(_FILE_SCOPES)}",
-                    code="MARKER_INVALID_FILE_SCOPE",
-                )
-
-        # Multi-Slot ist jetzt der Pflicht-Extensions-Filter. Ein leerer
-        # Slot ist Fehler — File-Variablen brauchen eine explizite
-        # Erlaubnisliste, damit der Wizard im ``accept``-Attribut filtern
-        # kann und der Backend-Upload einen klaren Validierungspfad hat.
-        #
-        # Regex-Detail: bei Werten mit ``|`` (z.B. ``pdf|docx``) landet
-        # der Inhalt im vierten Slot statt im dritten, weil der dritte
-        # Slot keine Pipe akzeptiert. Wir akzeptieren das transparent
-        # — beide Positionen werden auf den Extensions-Inhalt geprüft.
-        exts_slot: str | None = None
-        if raw_multi not in (None, ""):
-            exts_slot = raw_multi
-            if raw_scope not in (None, ""):
-                raise MarkerError(
-                    var_name,
-                    f"@openstack:file akzeptiert keinen fünften Slot "
-                    f"(angegeben: '{raw_scope}') — der Scope steht im "
-                    f"dritten Slot (z.B. ``@openstack:file:user:pdf``)",
-                    code="MARKER_FILE_EXTRA_SLOT",
-                )
-        elif raw_scope not in (None, ""):
-            exts_slot = raw_scope
-        if exts_slot is None:
-            raise MarkerError(
-                var_name,
-                "``@openstack:file`` braucht einen Endungsfilter im "
-                "vierten Slot, z.B. ``@openstack:file:all:pdf`` oder "
-                "``@openstack:file:user:pdf|docx``",
-                code="MARKER_FILE_MISSING_EXTENSIONS",
-            )
-        exts_raw = exts_slot.lower()
-        if not _FILE_EXTENSIONS_RE.match(exts_raw):
-            raise MarkerError(
-                var_name,
-                f"ungültiger Endungsfilter '{exts_slot}' — erlaubt sind "
-                f"alphanumerische Endungen, mehrere getrennt mit '|' "
-                f"(z.B. ``pdf|docx``)",
-                code="MARKER_FILE_INVALID_EXTENSIONS",
-            )
-        file_exts = exts_raw.split("|")
-
-        return (os_type, None, None, file_scope, file_scope, file_exts)
-
-    mode: str | None = None
-    if raw_mode is not None:
-        rm = raw_mode.lower()
-        if rm == "":
-            # Leerer Slot ist erlaubt: ``@openstack:flavor::multi`` heißt
-            # „mode = default, multi = multi". Wir lassen ``mode = None``,
-            # die Defaults werden vom Caller appliziert.
-            pass
-        elif rm in ("id", "name"):
-            mode = rm
-        elif rm in ("multi", "list", "single"):
-            # Häufiger Author-Fehler: User wollte ``:multi`` setzen aber
-            # hat den Mode-Slot nicht leer gelassen. Statt einer
-            # generischen „ungültiger mode"-Meldung den korrekten
-            # Marker zeigen.
-            raise MarkerError(
-                var_name,
-                f"'{raw_mode}' ist ein multi-Flag, nicht ein Mode — "
-                f"schreibe den Marker mit leerem Mode-Slot, z.B. "
-                f"``@openstack:{os_type}::{rm}``",
-                code="MARKER_MULTI_IN_MODE_SLOT",
-            )
-        elif rm in _VAR_SCOPES:
-            # var-scope-in-mode-slot: gleiche Logik wie für
-            # multi-in-mode-slot. Der App-Autor wollte den
-            # ``var_scope`` setzen, hat aber die mittleren Slots
-            # nicht leer gelassen (``@openstack:flavor:team`` statt
-            # ``@openstack:flavor:::team``). Statt einer kryptischen
-            # „ungültiger mode"-Meldung den korrekten Marker zeigen.
-            raise MarkerError(
-                var_name,
-                f"'{raw_mode}' ist ein var_scope, nicht ein Mode — "
-                f"schreibe den Marker mit leerem Mode-/Multi-Slot, z.B. "
-                f"``@openstack:{os_type}:::{rm}``",
-                code="MARKER_SCOPE_IN_MODE_SLOT",
-            )
-        else:
-            mode_suggestion = _closest_match(rm, {"id", "name"})
-            hint = f"; meintest du '{mode_suggestion}'?" if mode_suggestion else ""
-            raise MarkerError(
-                var_name,
-                f"ungültiger mode '{raw_mode}'{hint} — erwartet 'id' oder 'name'",
-                code="MARKER_INVALID_MODE",
-            )
-
-    multi: bool | None = None
-    if raw_multi is not None:
-        mm = raw_multi.lower()
-        if mm == "":
-            pass
-        elif mm in ("multi", "list"):
-            # ``list`` ist Synonym für ``multi`` — siehe Modul-Docstring.
-            multi = True
-        elif mm == "single":
-            multi = False
-        else:
-            multi_suggestion = _closest_match(mm, {"multi", "list", "single"})
-            hint = f"; meintest du '{multi_suggestion}'?" if multi_suggestion else ""
-            raise MarkerError(
-                var_name,
-                f"ungültiger multi-Flag '{raw_multi}'{hint} — erwartet "
-                "'multi', 'list' oder 'single'",
-                code="MARKER_INVALID_MULTI",
-            )
-
-    # Konsistenz-Check: explizite Marker-Werte gegen HCL-Type.
-    # ``list``/``set``/``tuple`` sind die kollektion-fähigen Picker-Types
-    # — bei diesen ist ``:multi`` natürlich. ``map``/``object`` sind
-    # technische Kollektionen, aber der Picker kann sie nicht sinnvoll
-    # bedienen — wir behandeln sie wie single-strings (für die
-    # Konflikt-Erkennung). Wer eine map mit ``:multi`` will, kriegt
-    # einen Konflikt-Error mit klarem Wording.
-    type_lower = (var_type or "").strip().lower()
-
-    # Bug #1 — ``:multi:team`` unreachable: bei scope team/user verlangt
-    # die Wizard-Vertragsschnittstelle eine ``map(...)`` als HCL-Type.
-    # Der ``is_collection_type``-Check würde hier zwangsläufig fehlschlagen
-    # (``map(list(string))`` startet mit ``map(``), obwohl die innere
-    # Element-Type eine echte Kollektion ist. Wir packen für scoped
-    # Marker den ``map(...)`` aus und prüfen den INNEREN Typ gegen die
-    # multi-Erwartung.
-    var_scope_for_check = _parse_var_scope(raw_scope)
-    type_for_collection_check = type_lower
-    if var_scope_for_check in ("team", "user") and type_lower.startswith("map("):
-        # Klammer-balanciert das innere Stück aus ``map(...)`` extrahieren.
-        # Naive ``[4:-1]``-Slicing reicht hier nicht, weil verschachtelte
-        # ``map(map(...))`` legitim sind — wir laufen einmal über die
-        # Zeichen und zählen Klammern.
-        depth = 0
-        start = type_lower.find("(")
-        inner_end = -1
-        for i in range(start, len(type_lower)):
-            ch = type_lower[i]
-            if ch == "(":
-                depth += 1
-            elif ch == ")":
-                depth -= 1
-                if depth == 0:
-                    inner_end = i
-                    break
-        if inner_end > start + 1:
-            type_for_collection_check = type_lower[start + 1:inner_end].strip()
-
-    is_collection_type = (
-        type_for_collection_check.startswith(("list(", "set(", "tuple("))
-        or type_for_collection_check in ("list", "set")
+    return _parse_resource_marker(
+        var_name, var_type, source, os_type, raw_mode, raw_multi, raw_scope
     )
-    if multi is True and not is_collection_type and type_for_collection_check not in ("", "string"):
-        # ``string`` lassen wir durchgehen, weil viele Apps ``type = string``
-        # ohne Multi-Marker meinen und das Frontend dann eh CSV liefert.
-        # Aber etwa ``type = number`` oder ``type = map(...)`` mit
-        # ``:multi`` ist offensichtlich widersprüchlich.
-        raise MarkerError(
-            var_name,
-            f"marker deklariert ':multi', aber HCL-Type ist '{var_type}' "
-            "— erlaubt sind nur ``string``, ``list(...)``, ``set(...)`` "
-            "und ``tuple(...)``",
-            code="MARKER_MULTI_TYPE_CONFLICT",
-        )
-    if multi is False and is_collection_type:
-        raise MarkerError(
-            var_name,
-            f"marker deklariert ':single', aber HCL-Type ist '{var_type}' "
-            "(eine list/set/tuple-Kollektion) — fixe einen der beiden",
-            code="MARKER_SINGLE_TYPE_CONFLICT",
-        )
 
-    # Vierter Slot bei non-file-Markern: der allgemeine ``var_scope``.
-    # Validierung passiert in ``_parse_var_scope`` (definiert oben in
-    # diesem Funktions-Body); Default-Auflösung in ``_apply_defaults``.
-    # Wir haben den scope bereits oben für den ``is_collection_type``-
-    # Inner-Type-Lookup geparst (Bug #1) — Re-Use, damit dieselbe
-    # Fehlermeldung nicht zweimal feuert.
-    var_scope = var_scope_for_check
-    if source == "packer" and var_scope in ("team", "user"):
-        raise MarkerError(
-            var_name,
-            f"packer-Variablen unterstützen nur ``var_scope = all``; "
-            f"angegeben: '{var_scope}'. Begründung: Packer baut EIN "
-            f"Image, das von allen späteren VMs/Teams/Usern geteilt "
-            f"wird — ein Per-Team-Wert hätte keine Wirkung.",
-            code="MARKER_PACKER_SCOPE_FORBIDDEN",
-        )
-
-    return (os_type, mode, multi, None, var_scope, None)
 
 
 def _apply_defaults(
@@ -794,7 +889,6 @@ def _closest_match(s: str, candidates: set[str]) -> str | None:
     """
     if not s:
         return None
-    import difflib
     matches = difflib.get_close_matches(s, candidates, n=1, cutoff=0.7)
     return matches[0] if matches else None
 
@@ -923,12 +1017,11 @@ def _coerce_hcl_default(raw_default: str, var_type: str) -> tuple[Any, bool]:
     is_map_like = type_lower.startswith("map(") or type_lower in ("map", "object")
 
     if is_list_like or is_map_like or stripped.startswith(("[", "{")):
-        # python-hcl2 wäre die saubere Variante; verfügbar ist es im
-        # Backend aktuell nicht und ein Lazy-Import würde den Import-
-        # Pfad fragil machen. Stattdessen json.loads — HCL-Literale
-        # für Listen/Maps mit String/Number/Bool-Werten sind eine
-        # echte Teilmenge von JSON.
-        import json
+        # python-hcl2 would be the clean option, but it isn't available
+        # in the backend right now and a lazy import would make the
+        # import path fragile. Instead we use json.loads — HCL literals
+        # for lists/maps with string/number/bool values are a true
+        # subset of JSON.
         try:
             return (json.loads(stripped), False)
         except (ValueError, TypeError):
@@ -1393,12 +1486,11 @@ def get_app(
                 }
                 app.versions = [
                     v for v in all_versions
-                    if (v if isinstance(v, str) else v.get("version") or v.get("releaseTag") or v.get("tag", "")) in approved_tags
+                    if _version_tag(v) in approved_tags
                 ]
         except Exception as e:
             app.versions = []
-            import logging
-            logging.getLogger(__name__).warning(f"Could not fetch versions: {str(e)}")
+            logger.warning(f"Could not fetch versions: {str(e)}")
     else:
         app.versions = []
 
@@ -1420,7 +1512,6 @@ def load_variable_definitions(app, version: str) -> list[dict[str, Any]]:
     Raises ``HTTPException(400)`` if the app has no Git link and
     bubbles unexpected errors as ``HTTPException(500)``.
     """
-    logger = logging.getLogger(__name__)
     if not app.git_link:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -1506,7 +1597,6 @@ def get_app_variables(
     # need the public+approved combination.
     ensure_view_app(current_user, app, db=db)
 
-    logger = logging.getLogger(__name__)
     variables = load_variable_definitions(app, version)
     if not variables:
         logger.warning("No variables found for app %s version %s", app_id, version)
@@ -1540,7 +1630,6 @@ def create_app(
     - **All authenticated users** can create apps
     - **Git repository access is verified** before creating the app
     """
-    logger = logging.getLogger(__name__)
     # Decode the optional image data-URL up front so a malformed
     # payload fails before we hit Keycloak / Git / DB.
     image_bytes, image_mime = parse_image_data_url(app.image)
@@ -1564,7 +1653,7 @@ def create_app(
         try:
             versions = git_service.get_versions(app.git_link)
             for v in versions:
-                tag = v.get("version") or v.get("releaseTag") or v.get("tag")
+                tag = _version_tag(v)
                 if tag:
                     with contextlib.suppress(Exception):
                         crud_approvals.submit_version(db, app_id=db_app.appId, version_tag=tag)

@@ -5,6 +5,7 @@ import json
 import logging
 import re
 from collections.abc import AsyncIterator
+from dataclasses import asdict
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
@@ -17,9 +18,10 @@ from app.crud import deployments as crud_deployments
 from app.crud import locks as crud_locks
 from app.crud import openstack_credentials as crud_openstack_credentials
 from app.crud import teams as crud_teams
+from app.crud import users as crud_users
 from app.database import get_db
+from app.models import Deployment, TaskStatus, TaskType, User, UserRole
 from app.models import Task as TaskModel  # for ad-hoc state queries
-from app.models import TaskStatus, TaskType, User, UserRole
 from app.schemas import (
     DeploymentCreate,
     DeploymentDetail,
@@ -39,6 +41,7 @@ from app.services.deployment_status import (
     build_resource_detail,
     build_resource_views,
 )
+from app.services.tf_state_parser import parse_tf_state
 from app.utils.capabilities import (
     can_view_deployment_owner,
     ensure_operate_deployment,
@@ -54,6 +57,98 @@ from app.utils.permissions import (
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
+
+
+def _list_course_scope_deployments(
+    db: Session,
+    current_user: User,
+    skip: int,
+    limit: int,
+    app_id: UUID | None,
+    status_filter: str | None,
+    student: UUID | None,
+) -> list:
+    """Resolve the ``?scope=course`` deployment listing for staff callers.
+
+    Phase 3 course-scope: list every deployment whose owner sits in one
+    of the requestor's taught courses. Admins use the same code path for
+    symmetry — usually their set is empty. Returns the raw ``Deployment``
+    rows; the caller runs the shared enrichment loop over the result.
+    """
+    my_courses = get_my_course_teacher_ids(current_user, db)
+    if current_user.role == UserRole.ADMIN:
+        # Admins always see everything inside the chosen scope.
+        # We still need the course-id filter to make ``?scope=course``
+        # narrow the listing in some way — otherwise the param is a
+        # no-op for admins. The implementation: pull every course
+        # the admin is registered as course-teacher for (typically
+        # empty), and fall back to the union with the explicit
+        # ``student`` filter so the route still does something
+        # useful in the common case of an admin requesting a
+        # specific student's deployments via the profile page.
+        pass
+    if not my_courses and current_user.role != UserRole.ADMIN:
+        # Teacher with no course-teacher rows — the course scope
+        # is empty by definition. Return an empty page rather
+        # than the teacher's own owned set, because that would
+        # mask the absence of any teacher-course assignment.
+        return []
+
+    # Resolve the set of candidate student userIds: every user
+    # whose ``courseId`` falls inside ``my_courses``. When the
+    # caller also passed ``?student=<id>``, narrow to that single
+    # user IFF they actually sit inside one of those courses.
+    student_q = db.query(User.userId).filter(
+        User.courseId.in_(my_courses)
+    )
+    if student is not None:
+        # ``?student=<id>``: require the student to be inside one
+        # of the teacher's courses; otherwise we'd leak that
+        # ``student`` exists at all to a teacher who can't see them.
+        student_q = student_q.filter(User.userId == student)
+    owner_ids = [row[0] for row in student_q.all()]
+
+    if current_user.role == UserRole.ADMIN and not owner_ids:
+        # Admin path with empty course set + no student filter →
+        # mirror the legacy behavior and show the admin's own
+        # owned set instead of an empty page, so the route stays
+        # backwards-compatible for admins who haven't picked up
+        # the scope= query param yet.
+        if student is None:
+            return crud_deployments.get_deployments(
+                db,
+                skip=skip,
+                limit=limit,
+                user_id=current_user.userId,
+                app_id=app_id,
+                status=status_filter,
+            )
+        return []
+    if not owner_ids:
+        # Teacher in scope mode but their courses are empty, or
+        # the named ``student`` isn't in any of their courses —
+        # empty page, no leak about that student's existence.
+        return []
+
+    # We can't easily widen the existing get_deployments
+    # signature to accept an owner_id IN clause without
+    # disturbing the other branches, so we build the query
+    # inline here. Same soft-delete + app_id + status
+    # semantics as the helper.
+    q = db.query(Deployment).filter(Deployment.deleted_at.is_(None))
+    q = q.filter(Deployment.userId.in_(owner_ids))
+    if app_id:
+        q = q.filter(Deployment.appId == app_id)
+    # Reuse the helper's status-filter implementation by
+    # forwarding to ``get_deployments`` with a synthetic
+    # ``user_id`` of None and a post-filter — but the helper
+    # short-circuits on user_id, so simplest is to inline the
+    # ordering/pagination and skip the status filter here. A
+    # course-teacher list view rarely needs status filtering
+    # in the index; the per-deployment detail page handles
+    # status-specific UX.
+    q = q.order_by(desc(Deployment.deploymentId))
+    return q.offset(skip).limit(limit).all()
 
 
 # ----------------------------------------------------------------
@@ -102,87 +197,15 @@ def list_deployments(
     use_course_scope = is_staff and scope == "course"
 
     if use_course_scope:
-        # Phase 3 course-scope: list every deployment whose owner sits
-        # in one of the requestor's taught courses. Admins use the
-        # same code path for symmetry — usually their set is empty.
-        my_courses = get_my_course_teacher_ids(current_user, db)
-        if current_user.role == UserRole.ADMIN:
-            # Admins always see everything inside the chosen scope.
-            # We still need the course-id filter to make ``?scope=course``
-            # narrow the listing in some way — otherwise the param is a
-            # no-op for admins. The implementation: pull every course
-            # the admin is registered as course-teacher for (typically
-            # empty), and fall back to the union with the explicit
-            # ``student`` filter so the route still does something
-            # useful in the common case of an admin requesting a
-            # specific student's deployments via the profile page.
-            pass
-        if not my_courses and current_user.role != UserRole.ADMIN:
-            # Teacher with no course-teacher rows — the course scope
-            # is empty by definition. Return an empty page rather
-            # than the teacher's own owned set, because that would
-            # mask the absence of any teacher-course assignment.
-            return []
-
-        # Resolve the set of candidate student userIds: every user
-        # whose ``courseId`` falls inside ``my_courses``. When the
-        # caller also passed ``?student=<id>``, narrow to that single
-        # user IFF they actually sit inside one of those courses.
-        student_q = db.query(User.userId).filter(
-            User.courseId.in_(my_courses)
+        deployments = _list_course_scope_deployments(
+            db,
+            current_user,
+            skip=skip,
+            limit=limit,
+            app_id=app_id,
+            status_filter=status_filter,
+            student=student,
         )
-        if student is not None:
-            # ``?student=<id>``: require the student to be inside one
-            # of the teacher's courses; otherwise we'd leak that
-            # ``student`` exists at all to a teacher who can't see them.
-            student_q = student_q.filter(User.userId == student)
-        owner_ids = [row[0] for row in student_q.all()]
-
-        if current_user.role == UserRole.ADMIN and not owner_ids:
-            # Admin path with empty course set + no student filter →
-            # mirror the legacy behavior and show the admin's own
-            # owned set instead of an empty page, so the route stays
-            # backwards-compatible for admins who haven't picked up
-            # the scope= query param yet.
-            if student is None:
-                deployments = crud_deployments.get_deployments(
-                    db,
-                    skip=skip,
-                    limit=limit,
-                    user_id=current_user.userId,
-                    app_id=app_id,
-                    status=status_filter,
-                )
-            else:
-                deployments = []
-        elif not owner_ids:
-            # Teacher in scope mode but their courses are empty, or
-            # the named ``student`` isn't in any of their courses —
-            # empty page, no leak about that student's existence.
-            return []
-        else:
-            from sqlalchemy import desc as _desc
-
-            # We can't easily widen the existing get_deployments
-            # signature to accept an owner_id IN clause without
-            # disturbing the other branches, so we build the query
-            # inline here. Same soft-delete + app_id + status
-            # semantics as the helper.
-            from app.models import Deployment as _Deployment
-            q = db.query(_Deployment).filter(_Deployment.deleted_at.is_(None))
-            q = q.filter(_Deployment.userId.in_(owner_ids))
-            if app_id:
-                q = q.filter(_Deployment.appId == app_id)
-            # Reuse the helper's status-filter implementation by
-            # forwarding to ``get_deployments`` with a synthetic
-            # ``user_id`` of None and a post-filter — but the helper
-            # short-circuits on user_id, so simplest is to inline the
-            # ordering/pagination and skip the status filter here. A
-            # course-teacher list view rarely needs status filtering
-            # in the index; the per-deployment detail page handles
-            # status-specific UX.
-            q = q.order_by(_desc(_Deployment.deploymentId))
-            deployments = q.offset(skip).limit(limit).all()
     elif is_staff:
         deployments = crud_deployments.get_deployments(
             db,
@@ -228,14 +251,7 @@ def list_deployments(
         # view doesn't ship megabytes of base64 to the browser; the
         # detail endpoint follows the same rule, and the dedicated
         # download route is the only path that returns raw bytes.
-        user_input_var_parsed = None
-        if deployment.userInputVar:
-            try:
-                user_input_var_parsed = _strip_file_vars_from_user_input(
-                    json.loads(deployment.userInputVar)
-                )
-            except json.JSONDecodeError:
-                user_input_var_parsed = None
+        user_input_var_parsed = _parse_and_strip_user_input(deployment.userInputVar)
 
         result.append(DeploymentResponse(
             deploymentId=deployment.deploymentId,
@@ -345,14 +361,7 @@ def get_deployment(
     # Parse userInputVar JSON string back to dict if it exists. Same
     # strip-file-bytes treatment as the list endpoint — base64
     # payloads are surfaced via the download route, not the JSON view.
-    user_input_var_parsed = None
-    if deployment.userInputVar:
-        try:
-            user_input_var_parsed = _strip_file_vars_from_user_input(
-                json.loads(deployment.userInputVar)
-            )
-        except json.JSONDecodeError:
-            user_input_var_parsed = None
+    user_input_var_parsed = _parse_and_strip_user_input(deployment.userInputVar)
 
     # ``deployment.app`` is the raw ORM relation whose ``image`` column
     # carries bytes. Pydantic's ``DeploymentDetail`` declares
@@ -801,6 +810,22 @@ def _strip_file_vars_from_user_input(user_input_var: dict | None) -> dict | None
     return out
 
 
+def _parse_and_strip_user_input(raw: str | None) -> dict | None:
+    """Parse a stored ``userInputVar`` JSON string and strip file bytes.
+
+    Wraps the ``json.loads`` → :func:`_strip_file_vars_from_user_input`
+    chain (with a malformed-JSON guard) shared by the list, detail, and
+    create responses so all three surface the same file-stripped shape.
+    Returns ``None`` for an empty or unparseable value.
+    """
+    if not raw:
+        return None
+    try:
+        return _strip_file_vars_from_user_input(json.loads(raw))
+    except json.JSONDecodeError:
+        return None
+
+
 def _looks_like_file_var(value) -> bool:
     """True if ``value`` matches the file-upload shape produced by
     :func:`_attach_files_to_user_input`: a non-empty mapping whose
@@ -966,7 +991,6 @@ def create_deployment(
     # Format teams for Terraform (team_name: [user_emails])
     teams_dict = {}
     if deployment.teams:
-        from app.crud import users as crud_users
         for team in deployment.teams:
             team_users = []
             for user_id in team.userIds:
@@ -980,80 +1004,43 @@ def create_deployment(
     # this inside the locked TX guarantees the envelope matches whatever
     # credential row a concurrent PUT might have committed: PUT is
     # serialized behind us by the same advisory lock.
-    try:
-        openstack_envelope = crud_openstack_credentials.get_dispatch_envelope(
-            db, current_user.userId
-        )
-    except crud_openstack_credentials.NoCredentialError:
-        db.rollback()
-        raise HTTPException(
-            status_code=status.HTTP_412_PRECONDITION_FAILED,
-            detail={"reason": "openstack_credentials_missing"},
-        )
+    openstack_envelope = _fetch_dispatch_envelope(
+        db, current_user.userId, rollback_on_missing=True
+    )
 
-    # Insert PENDING task row in the SAME transaction as the deployment.
-    # If anything below fails before commit, the rollback drops both —
-    # no orphan rows.
-    try:
-        task = task_service_module.prepare_task_in_tx(
-            db,
-            deployment_id=db_deployment.deploymentId,
-            task_type=TaskType.DEPLOY,
-        )
-    except task_service_module.ActiveTaskExistsError:
-        # Should be impossible on a freshly inserted deployment, but
-        # the partial unique index would catch it too.
-        db.rollback()
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="Deployment already has an active task",
-        )
+    # Insert PENDING task row in the SAME transaction as the deployment,
+    # commit atomically (deployment + teams + user_to_deployments + task),
+    # then dispatch to Celery outside the locked TX. On a send failure the
+    # task row is flipped to FAILED and we surface 503 — the deployment
+    # row stays, but the user sees an obvious failure instead of an
+    # eternal PENDING.
+    _commit_and_dispatch(
+        db,
+        deployment_id=db_deployment.deploymentId,
+        task_type=TaskType.DEPLOY,
+        celery_task_name="tasks.deploy_application",
+        celery_args=[
+            str(db_deployment.deploymentId),
+            str(db_deployment.appId),
+            db_deployment.app.git_link,
+            db_deployment.releaseTag,
+            user_vars,
+            teams_dict,
+            openstack_envelope,
+        ],
+        dispatch_error_label="Could not dispatch deployment task — please retry",
+        rollback_on_conflict=True,
+    )
 
-    # Atomic commit: deployment + teams + user_to_deployments + task row.
-    # The advisory lock is released here.
-    db.commit()
     db.refresh(db_deployment)
-    db.refresh(task)
-
-    # Dispatch to Celery OUTSIDE the locked TX. On failure the task row
-    # is flipped to FAILED in a fresh TX (handled in dispatch_to_celery)
-    # and we surface 503 — the deployment row stays, but the user sees
-    # an obvious failure instead of an eternal PENDING.
-    try:
-        task, _celery_id = task_service_module.dispatch_to_celery(
-            db,
-            task=task,
-            celery_task_name="tasks.deploy_application",
-            celery_args=[
-                str(db_deployment.deploymentId),
-                str(db_deployment.appId),
-                db_deployment.app.git_link,
-                db_deployment.releaseTag,
-                user_vars,
-                teams_dict,
-                openstack_envelope,
-            ],
-        )
-    except Exception:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Could not dispatch deployment task — please retry",
-        )
 
     status_value = crud_deployments.get_deployment_status(db, db_deployment.deploymentId)
     created_at = crud_deployments.get_deployment_created_at(db, db_deployment.deploymentId)
 
-    user_input_var_parsed = None
-    if db_deployment.userInputVar:
-        try:
-            # Same file-strip rule as the list/detail endpoints: the
-            # POST response shape mirrors the read shape so the
-            # frontend can reuse the same parsing code-path.
-            user_input_var_parsed = _strip_file_vars_from_user_input(
-                json.loads(db_deployment.userInputVar)
-            )
-        except json.JSONDecodeError:
-            user_input_var_parsed = None
+    # Same file-strip rule as the list/detail endpoints: the POST
+    # response shape mirrors the read shape so the frontend can reuse
+    # the same parsing code-path.
+    user_input_var_parsed = _parse_and_strip_user_input(db_deployment.userInputVar)
 
     return DeploymentResponse(
         deploymentId=db_deployment.deploymentId,
@@ -1149,6 +1136,81 @@ def delete_deployment(
             detail="Deployment not found",
         )
     return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+def _fetch_dispatch_envelope(db: Session, user_id, *, rollback_on_missing: bool):
+    """Fetch the encrypted OpenStack credential envelope for a dispatch.
+
+    Raises ``HTTPException(412, openstack_credentials_missing)`` when the
+    user has no credentials. ``rollback_on_missing`` is used by the
+    create path, which holds an uncommitted deployment insert that must
+    be rolled back before the 412 escapes; lifecycle callers have no such
+    pending insert and pass ``False``.
+    """
+    try:
+        return crud_openstack_credentials.get_dispatch_envelope(db, user_id)
+    except crud_openstack_credentials.NoCredentialError:
+        if rollback_on_missing:
+            db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_412_PRECONDITION_FAILED,
+            detail={"reason": "openstack_credentials_missing"},
+        )
+
+
+def _commit_and_dispatch(
+    db: Session,
+    *,
+    deployment_id,
+    task_type: TaskType,
+    celery_task_name: str,
+    celery_args: list,
+    dispatch_error_label: str,
+    rollback_on_conflict: bool,
+):
+    """Insert the PENDING task in-TX, commit, then dispatch to Celery.
+
+    Shared tail of the create and lifecycle dispatch paths:
+
+    * ``prepare_task_in_tx`` → ``HTTPException(409)`` on an active task
+      (the create path additionally rolls back its pending insert);
+    * ``commit`` + ``refresh`` the task row;
+    * ``dispatch_to_celery`` → ``HTTPException(503, dispatch_error_label)``
+      on a Celery send failure (the task row is flipped to FAILED inside
+      ``dispatch_to_celery`` in a fresh TX).
+
+    Returns the committed, dispatched ``Task``.
+    """
+    try:
+        task = task_service_module.prepare_task_in_tx(
+            db,
+            deployment_id=deployment_id,
+            task_type=task_type,
+        )
+    except task_service_module.ActiveTaskExistsError:
+        if rollback_on_conflict:
+            db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Deployment already has an active task",
+        )
+
+    db.commit()
+    db.refresh(task)
+
+    try:
+        task, _celery_id = task_service_module.dispatch_to_celery(
+            db,
+            task=task,
+            celery_task_name=celery_task_name,
+            celery_args=celery_args,
+        )
+    except Exception:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=dispatch_error_label,
+        )
+    return task
 
 
 def _dispatch_destroy(db: Session, deployment, current_user: User):
@@ -1255,52 +1317,28 @@ def _dispatch_lifecycle_task(
             members = crud_deployments.get_team_members(db, team.teamId)
             teams_dict[team.name] = [{"email": m.email} for m in members]
 
-    try:
-        openstack_envelope = crud_openstack_credentials.get_dispatch_envelope(
-            db, current_user.userId
-        )
-    except crud_openstack_credentials.NoCredentialError:
-        raise HTTPException(
-            status_code=status.HTTP_412_PRECONDITION_FAILED,
-            detail={"reason": "openstack_credentials_missing"},
-        )
+    openstack_envelope = _fetch_dispatch_envelope(
+        db, current_user.userId, rollback_on_missing=False
+    )
 
-    try:
-        task = task_service_module.prepare_task_in_tx(
-            db,
-            deployment_id=deployment.deploymentId,
-            task_type=task_type,
-        )
-    except task_service_module.ActiveTaskExistsError:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="Deployment already has an active task",
-        )
-
-    db.commit()
-    db.refresh(task)
-
-    try:
-        task, _celery_id = task_service_module.dispatch_to_celery(
-            db,
-            task=task,
-            celery_task_name=celery_task_name,
-            celery_args=[
-                str(deployment.deploymentId),
-                str(deployment.appId),
-                deployment.app.git_link,
-                deployment.releaseTag,
-                user_vars,
-                teams_dict,
-                openstack_envelope,
-                *(extra_args or []),
-            ],
-        )
-    except Exception:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail=f"Could not dispatch {task_type.value} task — please retry",
-        )
+    task = _commit_and_dispatch(
+        db,
+        deployment_id=deployment.deploymentId,
+        task_type=task_type,
+        celery_task_name=celery_task_name,
+        celery_args=[
+            str(deployment.deploymentId),
+            str(deployment.appId),
+            deployment.app.git_link,
+            deployment.releaseTag,
+            user_vars,
+            teams_dict,
+            openstack_envelope,
+            *(extra_args or []),
+        ],
+        dispatch_error_label=f"Could not dispatch {task_type.value} task — please retry",
+        rollback_on_conflict=False,
+    )
 
     return JSONResponse(
         status_code=status.HTTP_202_ACCEPTED,
@@ -1518,7 +1556,6 @@ def redeploy_deployment_resource(
     # the current state. We re-parse here instead of trusting the
     # output of the list endpoint — a hand-crafted POST would skip
     # the list call entirely.
-    from app.services.tf_state_parser import parse_tf_state
     state_json = _latest_tf_state_for(deployment_id, db)
     parsed = parse_tf_state(state_json)
     match = next((r for r in parsed if r.address == address), None)
@@ -1557,7 +1594,6 @@ def _view_asdict(view) -> dict:
     above read symmetrically and we can swap in custom handling later
     if needed (e.g. enum serialisation).
     """
-    from dataclasses import asdict
     return asdict(view)
 
 
@@ -1889,7 +1925,7 @@ def resend_access_credentials(
 # LIVE STREAM — Server-Sent Events for progress + log tail
 # ----------------------------------------------------------------
 #
-# Two flavours of events flow through the stream:
+# Several kinds of events flow through the stream:
 #
 # * ``event: snapshot`` — fired once at connect with the latest task's
 #   current_phase / progress_pct / status. Lets a freshly-loaded page

@@ -1,9 +1,7 @@
 """
 Permission and authorization utilities for role-based access control.
 
-Phase 1 of the RBAC refactor — this module keeps every public name it
-exposed before so no router has to change. The internal implementation
-is reshaped around two ideas:
+The module is built around two ideas:
 
 * a ``require_roles()`` FastAPI-dependency factory that produces a
   callable enforcing one or more :class:`UserRole` values, and
@@ -11,10 +9,11 @@ is reshaped around two ideas:
   two common groupings used across the app.
 
 The historical helpers (``get_current_admin``, ``get_current_teacher_or_admin``,
-``get_current_student``) are kept as thin aliases that delegate to
-``require_roles()``. They will be removed in a later phase once every
-router has been migrated to either ``require_admin`` / ``require_staff``
-or a capability check from :mod:`app.utils.capabilities`.
+``get_current_student``) remain as thin aliases that delegate to
+``require_roles()`` so existing routers keep working. Fine-grained,
+resource-level decisions live in :mod:`app.utils.capabilities`; new
+routers should prefer ``require_admin`` / ``require_staff`` or a
+capability check over the legacy aliases.
 """
 from collections.abc import Callable
 from functools import wraps
@@ -100,17 +99,16 @@ require_staff = require_roles(UserRole.TEACHER, UserRole.ADMIN)
 
 
 # ----------------------------------------------------------------
-# LEGACY ROLE HELPERS  (Phase 1: kept as thin aliases)
+# LEGACY ROLE HELPERS  (kept as thin aliases)
 # ----------------------------------------------------------------
-# These names are still imported across the codebase. To honour the
-# "no external behavior change" constraint of Phase 1, we keep the same
-# names and call signatures and delegate to ``require_roles()``. They
-# will be removed in Phase 2 once every router is migrated.
+# These names are still imported across the codebase. We keep the same
+# names and call signatures and delegate to ``require_roles()`` so
+# existing routers keep working; new code should prefer
+# ``require_admin`` / ``require_staff`` directly.
 def get_current_admin(current_user: User = Depends(get_current_user)) -> User:
     """Require ADMIN role.
 
-    Phase 1 shim around ``require_admin``. Kept so existing routers
-    don't have to change yet. Raises 403 with the new structured
+    Thin alias around ``require_admin``. Raises 403 with the structured
     ``role_required`` payload — same status, slightly richer body.
     """
     if current_user.role != UserRole.ADMIN:
@@ -127,7 +125,7 @@ def get_current_admin(current_user: User = Depends(get_current_user)) -> User:
 def get_current_teacher_or_admin(current_user: User = Depends(get_current_user)) -> User:
     """Require TEACHER or ADMIN role.
 
-    Phase 1 shim around ``require_staff``.
+    Thin alias around ``require_staff``.
     """
     if current_user.role not in STAFF_ROLES:
         raise HTTPException(
@@ -159,7 +157,7 @@ def require_role(allowed_roles: list[UserRole]) -> Callable:
     Prefer ``Depends(require_roles(...))`` on the route signature —
     decorators on FastAPI routes are fragile because they bypass the
     dependency injection system. This is only here so callers that
-    still use ``@require_role([...])`` keep working in Phase 1.
+    still use ``@require_role([...])`` keep working.
     """
     def decorator(func):
         @wraps(func)
@@ -186,12 +184,12 @@ def require_role(allowed_roles: list[UserRole]) -> Callable:
 
 
 # ----------------------------------------------------------------
-# COURSE-LEVEL ACCESS (legacy — kept for Phase 1 compatibility)
+# COURSE-LEVEL ACCESS (legacy)
 # ----------------------------------------------------------------
-# Note: ``check_resource_ownership`` and ``ensure_resource_access``
-# wurden in Phase 2 entfernt. Sie waren der Ursprung von Bug #2
-# (Teacher-Bypass auf fremde Apps). Alle Konsumenten sind auf
-# Capability-Funktionen aus ``app.utils.capabilities`` umgestellt.
+# Note: ``check_resource_ownership`` and ``ensure_resource_access`` have
+# been removed. They were the origin of Bug #2 (teacher bypass on other
+# users' apps). All consumers now use capability functions from
+# ``app.utils.capabilities``.
 
 def check_course_access(course_id: str, current_user: User) -> bool:
     """

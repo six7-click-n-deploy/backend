@@ -1,6 +1,5 @@
 import enum
 import uuid
-from datetime import datetime
 
 from sqlalchemy import (
     Boolean,
@@ -18,6 +17,7 @@ from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import relationship
 
 from app.database import Base
+from app.utils.time import utcnow
 
 
 # ----------------------------------------------------------------
@@ -76,9 +76,7 @@ class Course(Base):
     # ``course_teachers`` join table. A given course can have several
     # teachers, and a given teacher can own several courses. This is
     # the data backing the ``is_course_teacher`` capability check —
-    # see :mod:`app.utils.capabilities`. Phase 1 only defines the
-    # schema; backfill of the existing teacher-per-course relationship
-    # happens in Phase 3.
+    # see :mod:`app.utils.capabilities`.
     course_teachers = relationship(
         "CourseTeacher",
         back_populates="course",
@@ -101,7 +99,7 @@ class User(Base):
     lastName = Column(String, nullable=True)
     role = Column(Enum(UserRole), nullable=False, default=UserRole.STUDENT)
     courseId = Column(UUID(as_uuid=True), ForeignKey("courses.courseId"), nullable=True, index=True)
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=utcnow)
 
     # Relationships
     course = relationship("Course", back_populates="users")
@@ -138,7 +136,7 @@ class App(Base):
     git_link = Column(String, nullable=True)
     is_private = Column(Boolean, nullable=False, default=False)
     userId = Column(UUID(as_uuid=True), ForeignKey("users.userId"), nullable=False, index=True)
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=utcnow)
     # Soft-delete marker. When set, the app is hidden from default
     # queries (apps list, deploy wizard) but the row stays so existing
     # deployments referencing this app keep their FK valid and the
@@ -166,7 +164,7 @@ class Deployment(Base):
     deploymentId = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     name = Column(String, nullable=False)
     releaseTag = Column(String, nullable=True)
-    userInputVar = Column(Text, nullable=True)  # könnte auch JSON sein
+    userInputVar = Column(Text, nullable=True)  # could also be JSON
     userId = Column(UUID(as_uuid=True), ForeignKey("users.userId"), nullable=False, index=True)
     appId = Column(UUID(as_uuid=True), ForeignKey("apps.appId"), nullable=False, index=True)
     # Soft-delete marker. Set to ``utcnow()`` to hide the deployment
@@ -218,9 +216,9 @@ class Task(Base):
     status = Column(Enum(TaskStatus), default=TaskStatus.PENDING)
     started_at = Column(DateTime, nullable=True)
     finished_at = Column(DateTime, nullable=True)
-    logs = Column(Text, nullable=True)  # JSON oder Text
-    tf_state = Column(Text, nullable=True)  # Terraform State als JSON/Text
-    outputs = Column(Text, nullable=True)  # Terraform Outputs als JSON/Text
+    logs = Column(Text, nullable=True)  # JSON or text
+    tf_state = Column(Text, nullable=True)  # Terraform state as JSON/text
+    outputs = Column(Text, nullable=True)  # Terraform outputs as JSON/text
     # Live-progress columns. Updated by the celery event listener whenever
     # the worker emits a `task-progress` event. They are advisory — the
     # canonical source of "what is happening right now" is the SSE stream;
@@ -228,7 +226,7 @@ class Task(Base):
     # phase/percent without waiting for the next event.
     current_phase = Column(String(50), nullable=True)
     progress_pct = Column(Integer, nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=utcnow)
 
     # Relationships
     deployment = relationship("Deployment", back_populates="tasks")
@@ -348,8 +346,8 @@ class UserOpenStackCredential(Base):
 
     last_validated_at = Column(DateTime, nullable=True)
     last_validation_error = Column(Text, nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at = Column(DateTime, default=utcnow)
+    updated_at = Column(DateTime, default=utcnow, onupdate=utcnow)
 
     user = relationship("User", back_populates="openstack_credential")
 
@@ -383,7 +381,7 @@ class AppVersionApproval(Base):
         index=True,
     )
     reviewed_at = Column(DateTime, nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    created_at = Column(DateTime, default=utcnow, nullable=False)
 
     __table_args__ = (
         UniqueConstraint("appId", "version_tag", name="uq_app_version_approval"),

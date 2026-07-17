@@ -249,20 +249,31 @@ def get_current_user_keycloak(
 # ----------------------------------------------------------------
 # KEYCLOAK USER LOOKUP (admin API)
 # ----------------------------------------------------------------
+def _project_keycloak_user(u: dict, *, include_enabled: bool = False) -> dict:
+    """Project a raw Keycloak user record into our simplified dict shape.
+
+    Includes the ``enabled`` flag only when ``include_enabled`` is set,
+    preserving the differing output shapes of the two call sites.
+    """
+    projected = {
+        "id": u.get("id"),
+        "username": u.get("username"),
+        "email": u.get("email"),
+        "firstName": u.get("firstName", ""),
+        "lastName": u.get("lastName", ""),
+    }
+    if include_enabled:
+        projected["enabled"] = u.get("enabled", True)
+    return projected
+
+
 def search_keycloak_users(search_query: str, max_results: int = 10) -> list[dict]:
     """Search Keycloak users by username/email/name (uses service account)."""
     try:
         keycloak_admin = get_keycloak_admin()
         users = keycloak_admin.get_users({"search": search_query, "max": max_results})
         return [
-            {
-                "id": u.get("id"),
-                "username": u.get("username"),
-                "email": u.get("email"),
-                "firstName": u.get("firstName", ""),
-                "lastName": u.get("lastName", ""),
-                "enabled": u.get("enabled", True),
-            }
+            _project_keycloak_user(u, include_enabled=True)
             for u in users
         ]
     except Exception:
@@ -290,13 +301,9 @@ def get_keycloak_users_by_ids(ids: list[str]) -> dict:
                     user = None
             if not user:
                 continue
-            result[user.get("id") or kid] = {
-                "id": user.get("id") or kid,
-                "username": user.get("username"),
-                "email": user.get("email"),
-                "firstName": user.get("firstName", ""),
-                "lastName": user.get("lastName", ""),
-            }
+            projected = _project_keycloak_user(user)
+            projected["id"] = user.get("id") or kid
+            result[user.get("id") or kid] = projected
         return result
     except Exception:
         raise HTTPException(
