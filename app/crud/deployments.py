@@ -3,11 +3,21 @@ from datetime import datetime
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import desc, exists
+from sqlalchemy import and_, asc, desc, exists, func
 from sqlalchemy.orm import Session, joinedload
 
-from app.models import Deployment, Task, TaskStatus, TaskType, Team, User, UserToDeployment
+from app.models import (
+    Deployment,
+    Task,
+    TaskStatus,
+    TaskType,
+    Team,
+    User,
+    UserToDeployment,
+    UserToTeam,
+)
 from app.schemas import DeploymentCreate
+from app.utils.time import utcnow
 
 
 def _is_destroyed_subq():
@@ -102,7 +112,6 @@ def get_latest_task(db: Session, deployment_id: UUID) -> Task | None:
 
 def get_first_task(db: Session, deployment_id: UUID) -> Task | None:
     """Get the first task for a deployment (when deployment was created)"""
-    from sqlalchemy import asc
     return (
         db.query(Task)
         .filter(Task.deploymentId == deployment_id)
@@ -224,7 +233,6 @@ def bulk_get_task_summary(
     are simply absent from the map; the caller must handle that with
     ``.get(deployment_id, (None, None, None))``.
     """
-    from sqlalchemy import asc, func
 
     if not deployment_ids:
         return {}
@@ -282,7 +290,6 @@ def bulk_get_task_summary(
 
 def get_team_members(db: Session, team_id: UUID) -> list[User]:
     """Get all users in a team"""
-    from app.models import UserToTeam
     user_ids = (
         db.query(UserToTeam.userId)
         .filter(UserToTeam.teamId == team_id)
@@ -371,7 +378,6 @@ def get_deployments(
         # Owner OR team member OR direct mapping. Use a UNION-ish
         # approach via a subquery on teamIds the user belongs to so
         # the OR doesn't explode into a cartesian.
-        from app.models import UserToTeam
         member_team_ids = (
             db.query(UserToTeam.teamId).filter(UserToTeam.userId == member_user_id)
         )
@@ -399,8 +405,6 @@ def get_deployments(
     # filtering by ``running`` could return fewer than ``limit`` matches
     # even when the DB had more.
     if status:
-        from sqlalchemy import and_, func
-
         latest_rn = (
             func.row_number()
             .over(partition_by=Task.deploymentId, order_by=desc(Task.created_at))
@@ -461,18 +465,6 @@ def get_deployments(
     return query.offset(skip).limit(limit).all()
 
 
-def get_deployments_with_status(db: Session, deployments: list[Deployment]) -> list[dict[str, Any]]:
-    """Enrich deployments with their current status from latest task"""
-    result = []
-    for deployment in deployments:
-        status = get_deployment_status(db, deployment.deploymentId)
-        result.append({
-            "deployment": deployment,
-            "status": status
-        })
-    return result
-
-
 def create_deployment(db: Session, deployment: DeploymentCreate, user_id: UUID) -> Deployment:
     """Insert a deployment row in the current transaction.
 
@@ -512,15 +504,9 @@ def soft_delete_deployment(db: Session, deployment_id: UUID) -> bool:
     db_deployment = get_deployment(db, deployment_id)
     if not db_deployment:
         return False
-    db_deployment.deleted_at = datetime.utcnow()
+    db_deployment.deleted_at = utcnow()
     db.commit()
     return True
-
-
-# Back-compat alias. The old hard-delete contract no longer exists; any
-# remaining caller now soft-deletes. New code should call
-# ``soft_delete_deployment`` directly.
-delete_deployment = soft_delete_deployment
 
 
 def create_user_to_deployments(

@@ -75,6 +75,14 @@ def _build_connect_kwargs(creds: dict) -> dict:
     return base
 
 
+def _quota_item(used: int, obj, attr: str, default: int, unit: str | None = None) -> QuotaItem:
+    """Build a QuotaItem, reading the limit from ``obj.attr`` (with ``default``)
+    exactly once. ``available`` is ``limit - used`` and is intentionally not
+    clamped, matching the existing behavior."""
+    limit = getattr(obj, attr, default)
+    return QuotaItem(used=used, limit=limit, available=limit - used, unit=unit)
+
+
 def _get_openstack_conn_for_user(db: Session, user: User):
     """Build a per-user OpenStack connection from the stored credential row."""
     try:
@@ -93,8 +101,8 @@ def get_quota_overview(
     current_user: User = Depends(get_current_user_keycloak),
 ):
     """
-    Holt OpenStack Quota-Übersicht für Compute, Storage und Network
-    aus dem **persönlichen** OpenStack-Projekt des Users.
+    Fetch the OpenStack quota overview for compute, storage and network
+    from the user's **personal** OpenStack project.
 
     Declared sync (not async) on purpose: every call inside hits the
     OpenStack SDK with blocking network I/O. A sync def runs in
@@ -103,7 +111,7 @@ def get_quota_overview(
     /users/me) that are mounted on the same dashboard view.
 
     Returns:
-        QuotaOverviewResponse mit used/limit/available für alle Ressourcen
+        QuotaOverviewResponse with used/limit/available for all resources
     """
     try:
         conn = _get_openstack_conn_for_user(db, current_user)
@@ -115,21 +123,17 @@ def get_quota_overview(
             compute_usage = conn.compute.get_limits()
 
             compute = ComputeQuotas(
-                instances=QuotaItem(
-                    used=getattr(compute_usage.absolute, 'total_instances_used', 0),
-                    limit=getattr(compute_limits, 'instances', 0),
-                    available=getattr(compute_limits, 'instances', 0) - getattr(compute_usage.absolute, 'total_instances_used', 0)
+                instances=_quota_item(
+                    getattr(compute_usage.absolute, 'total_instances_used', 0),
+                    compute_limits, 'instances', 0,
                 ),
-                vcpus=QuotaItem(
-                    used=getattr(compute_usage.absolute, 'total_cores_used', 0),
-                    limit=getattr(compute_limits, 'cores', 0),
-                    available=getattr(compute_limits, 'cores', 0) - getattr(compute_usage.absolute, 'total_cores_used', 0)
+                vcpus=_quota_item(
+                    getattr(compute_usage.absolute, 'total_cores_used', 0),
+                    compute_limits, 'cores', 0,
                 ),
-                ram=QuotaItem(
-                    used=getattr(compute_usage.absolute, 'total_ram_used', 0),
-                    limit=getattr(compute_limits, 'ram', 0),
-                    available=getattr(compute_limits, 'ram', 0) - getattr(compute_usage.absolute, 'total_ram_used', 0),
-                    unit="MB"
+                ram=_quota_item(
+                    getattr(compute_usage.absolute, 'total_ram_used', 0),
+                    compute_limits, 'ram', 0, unit="MB",
                 )
             )
         except Exception:
@@ -164,50 +168,26 @@ def get_quota_overview(
         # === NETWORK QUOTAS ===
         network_limits = conn.network.get_quota(project_id)
 
-        # Zähle tatsächliche Ressourcen-Nutzung
+        # Count the actual resource usage.
         floating_ips_used = len(list(conn.network.ips()))
         security_groups_used = len(list(conn.network.security_groups()))
         networks_used = len(list(conn.network.networks()))
         ports_used = len(list(conn.network.ports()))
         routers_used = len(list(conn.network.routers()))
 
-        # Security Group Rules über alle Security Groups zählen
+        # Count security group rules across all security groups.
         sg_rules_used = sum(
             len(list(conn.network.security_group_rules(security_group_id=sg.id)))
             for sg in conn.network.security_groups()
         )
 
         network = NetworkQuotas(
-            floating_ips=QuotaItem(
-                used=floating_ips_used,
-                limit=getattr(network_limits, 'floatingip', 50),
-                available=getattr(network_limits, 'floatingip', 50) - floating_ips_used
-            ),
-            security_groups=QuotaItem(
-                used=security_groups_used,
-                limit=getattr(network_limits, 'security_group', 10),
-                available=getattr(network_limits, 'security_group', 10) - security_groups_used
-            ),
-            security_group_rules=QuotaItem(
-                used=sg_rules_used,
-                limit=getattr(network_limits, 'security_group_rule', 100),
-                available=getattr(network_limits, 'security_group_rule', 100) - sg_rules_used
-            ),
-            networks=QuotaItem(
-                used=networks_used,
-                limit=getattr(network_limits, 'network', 100),
-                available=getattr(network_limits, 'network', 100) - networks_used
-            ),
-            ports=QuotaItem(
-                used=ports_used,
-                limit=getattr(network_limits, 'port', 500),
-                available=getattr(network_limits, 'port', 500) - ports_used
-            ),
-            routers=QuotaItem(
-                used=routers_used,
-                limit=getattr(network_limits, 'router', 10),
-                available=getattr(network_limits, 'router', 10) - routers_used
-            )
+            floating_ips=_quota_item(floating_ips_used, network_limits, 'floatingip', 50),
+            security_groups=_quota_item(security_groups_used, network_limits, 'security_group', 10),
+            security_group_rules=_quota_item(sg_rules_used, network_limits, 'security_group_rule', 100),
+            networks=_quota_item(networks_used, network_limits, 'network', 100),
+            ports=_quota_item(ports_used, network_limits, 'port', 500),
+            routers=_quota_item(routers_used, network_limits, 'router', 10)
         )
 
         return QuotaOverviewResponse(compute=compute, storage=storage, network=network)

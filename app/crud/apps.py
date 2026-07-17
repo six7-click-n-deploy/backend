@@ -1,10 +1,10 @@
-from datetime import datetime
 from uuid import UUID
 
 from sqlalchemy.orm import Session
 
 from app.models import App, AppVersionApproval, AppVersionApprovalStatus
 from app.schemas import AppCreate, AppUpdate
+from app.utils.time import utcnow
 
 
 def get_app(
@@ -67,7 +67,7 @@ def get_visible_apps(
         .filter(
             (App.userId == requesting_user_id)
             | (
-                (App.is_private == False)  # noqa: E712
+                App.is_private.is_(False)
                 & App.appId.in_(approved_app_ids)
             )
         )
@@ -156,11 +156,6 @@ def soft_delete_app(db: Session, app_id: UUID) -> bool:
     db_app = get_app(db, app_id)
     if not db_app:
         return False
-    db_app.deleted_at = datetime.utcnow()
+    db_app.deleted_at = utcnow()
     db.commit()
     return True
-
-
-# Back-compat alias. Old call sites that imported ``delete_app``
-# now soft-delete; new code should call ``soft_delete_app`` directly.
-delete_app = soft_delete_app

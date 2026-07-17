@@ -25,6 +25,23 @@ from app.utils.permissions import (
 router = APIRouter()
 
 
+def _find_course_teacher(db: Session, course_id: UUID, user_id: UUID):
+    """Return the ``course_teachers`` row for this (course, user) pair, or None.
+
+    Shared by the add/remove course-teacher endpoints; each caller keeps
+    its own None-handling (add treats None as "not yet a teacher", remove
+    treats None as 404).
+    """
+    return (
+        db.query(CourseTeacher)
+        .filter(
+            CourseTeacher.courseId == course_id,
+            CourseTeacher.userId == user_id,
+        )
+        .first()
+    )
+
+
 # ----------------------------------------------------------------
 # GET ALL COURSES
 # ----------------------------------------------------------------
@@ -325,14 +342,7 @@ def add_course_teacher(
             },
         )
 
-    existing = (
-        db.query(CourseTeacher)
-        .filter(
-            CourseTeacher.courseId == course_id,
-            CourseTeacher.userId == user_id,
-        )
-        .first()
-    )
+    existing = _find_course_teacher(db, course_id, user_id)
     if existing is None:
         db.add(CourseTeacher(courseId=course_id, userId=user_id))
         db.commit()
@@ -365,14 +375,7 @@ def remove_course_teacher(
             detail="Course not found",
         )
 
-    row = (
-        db.query(CourseTeacher)
-        .filter(
-            CourseTeacher.courseId == course_id,
-            CourseTeacher.userId == user_id,
-        )
-        .first()
-    )
+    row = _find_course_teacher(db, course_id, user_id)
     if row is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,

@@ -1,10 +1,10 @@
-from datetime import datetime
 from uuid import UUID
 
 from fastapi import HTTPException, status
 from sqlalchemy.orm import Session
 
 from app.models import App, AppVersionApproval, AppVersionApprovalStatus
+from app.utils.time import utcnow
 
 
 def submit_version(
@@ -51,7 +51,7 @@ def submit_version(
         diff_url=diff_url,
         notes=notes,
         status=AppVersionApprovalStatus.PENDING,
-        created_at=datetime.utcnow(),
+        created_at=utcnow(),
     )
     db.add(approval)
     db.commit()
@@ -158,7 +158,7 @@ def approve(
 
     approval.status = AppVersionApprovalStatus.APPROVED
     approval.reviewed_by = admin_id
-    approval.reviewed_at = datetime.utcnow()
+    approval.reviewed_at = utcnow()
     approval.rejection_reason = None
     db.commit()
     db.refresh(approval)
@@ -183,7 +183,7 @@ def reject(
 
     approval.status = AppVersionApprovalStatus.REJECTED
     approval.reviewed_by = admin_id
-    approval.reviewed_at = datetime.utcnow()
+    approval.reviewed_at = utcnow()
     approval.rejection_reason = rejection_reason
     db.commit()
     db.refresh(approval)
@@ -208,7 +208,7 @@ def revoke(
 
     approval.status = AppVersionApprovalStatus.REJECTED
     approval.reviewed_by = admin_id
-    approval.reviewed_at = datetime.utcnow()
+    approval.reviewed_at = utcnow()
     approval.rejection_reason = rejection_reason
     db.commit()
     db.refresh(approval)

@@ -30,7 +30,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from datetime import datetime, timedelta
+from datetime import timedelta
 
 from celery.result import AsyncResult
 from sqlalchemy import text
@@ -41,6 +41,7 @@ from app.crud import locks as crud_locks
 from app.crud import tasks as crud_tasks
 from app.database import SessionLocal
 from app.models import Task, TaskStatus
+from app.utils.time import utcnow
 
 logger = logging.getLogger(__name__)
 
@@ -137,7 +138,7 @@ def _release_lock(db: Session) -> None:
 
 
 def _reconcile_task(db: Session, task: Task) -> None:
-    now = datetime.utcnow()
+    now = utcnow()
 
     # Per-deployment advisory lock — serialises against the request
     # handlers (POST /pause, /resume, DELETE, /resend-access) so the

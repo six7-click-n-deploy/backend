@@ -358,8 +358,12 @@ def _fetch_sg_summaries(
         if sg is None:
             continue
         rules = list(getattr(sg, "security_group_rules", None) or [])
-        ingress = sum(1 for r in rules if (r.get("direction") if isinstance(r, dict) else getattr(r, "direction", None)) == "ingress")
-        egress = sum(1 for r in rules if (r.get("direction") if isinstance(r, dict) else getattr(r, "direction", None)) == "egress")
+
+        def _direction(r: Any) -> Any:
+            return r.get("direction") if isinstance(r, dict) else getattr(r, "direction", None)
+
+        ingress = sum(1 for r in rules if _direction(r) == "ingress")
+        egress = sum(1 for r in rules if _direction(r) == "egress")
         out.append(
             SecurityGroupSummary(
                 id=str(getattr(sg, "id", sid)),

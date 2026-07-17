@@ -21,10 +21,10 @@ class UserCreate(UserBase):
 
 
 class UserUpdate(BaseModel):
-    # Phase 2 — Profile-Edit (firstName/lastName/email/username) ist
-    # nicht mehr Teil dieser App. Self-Service läuft ausschließlich
-    # über Keycloak. Der einzige verbleibende Update-Pfad ist
-    # ``role`` und ist Admin-only (siehe ``PUT /users/{id}``).
+    # Phase 2 — Profile editing (firstName/lastName/email/username) is
+    # no longer part of this app. Self-service runs exclusively
+    # through Keycloak. The only remaining update path is
+    # ``role`` and is admin-only (see ``PUT /users/{id}``).
     role: UserRole | None = None
     courseId: UUID | None = None
 
@@ -460,13 +460,13 @@ class TaskResponse(TaskBase):
 # ----------------------------------------------------------------
 # TEAM SCHEMAS
 #
-# Teams sind heute direkt an ein Deployment gebunden (FK
-# ``deployments.deploymentId`` -> ``Team.deploymentId``). Das alte
-# Zwischenmodell ``UserGroup`` wurde im Pre-RBAC-Refactor entfernt;
-# alle ``userGroupId``-Felder waren danach toter Schema-Code, der
-# beim Response-Serialisieren auf ``Team`` (das nur ``deploymentId``
-# hat) zu 500 ResponseValidationError führte. Die Schemas spiegeln
-# jetzt das Modell 1:1.
+# Teams are today bound directly to a deployment (FK
+# ``deployments.deploymentId`` -> ``Team.deploymentId``). The old
+# intermediate model ``UserGroup`` was removed in the pre-RBAC refactor;
+# all ``userGroupId`` fields were dead schema code afterwards, which
+# caused a 500 ResponseValidationError when serializing the response
+# to ``Team`` (which only has ``deploymentId``). The schemas now
+# mirror the model 1:1.
 # ----------------------------------------------------------------
 class TeamBase(BaseModel):
     name: str

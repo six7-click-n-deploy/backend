@@ -22,7 +22,6 @@ listener doesn't need a Postgres roundtrip on the hot path.
 import json
 import logging
 import re
-from datetime import datetime
 from typing import Any
 
 from celery.events import EventReceiver
@@ -36,6 +35,7 @@ from app.database import SessionLocal
 from app.models import TaskStatus, TaskType
 from app.services import deployment_notifier
 from app.services.deployment_pubsub import pubsub
+from app.utils.time import utcnow
 
 logger = logging.getLogger(__name__)
 
@@ -209,6 +209,422 @@ def _translate_celery_infra_exception(
     return (None, None)
 
 
+def _update_task_progress(deployment_id: str, event: dict) -> None:
+    """Persist phase / progress columns for the active deploy task.
+
+    Best-effort: we look up the most recent active task on the
+    deployment (status running/pending) and update two cheap
+    columns. Failures here are logged at debug-level — the live
+    SSE stream is the source-of-truth for users actively watching;
+    the DB columns are only the fallback for users opening the
+    page later.
+    """
+    db: Session = SessionLocal()
+    try:
+        tasks = crud_tasks.get_tasks(db, deployment_id=deployment_id)
+        # Pick the latest task that is still in flight; created_at
+        # ordering matches the listener's own `task-started` write.
+        active = next(
+            (
+                t
+                for t in sorted(tasks, key=lambda x: x.created_at, reverse=True)
+                if t.status in (TaskStatus.RUNNING, TaskStatus.PENDING)
+            ),
+            None,
+        )
+        if active is None:
+            return
+        update: dict = {}
+        phase = event.get('phase')
+        pct = event.get('progress_pct')
+        if phase is not None:
+            update['current_phase'] = phase
+        if pct is not None:
+            # Clamp defensively — the worker sends 0..100 already.
+            update['progress_pct'] = max(0, min(100, int(pct)))
+        if update:
+            crud_tasks.update_task(db, active.taskId, update)
+    except Exception as e:
+        logger.debug(f"Could not persist progress for {deployment_id}: {e}")
+    finally:
+        db.close()
+
+
+def _handle_custom_event(event: dict) -> None:
+    """Fan a live progress/log event out to SSE subscribers.
+
+    These are emitted via ``self.send_event(...)`` from inside the
+    deploy task. They don't have a one-to-one mapping to a ``tasks``
+    DB row in the legacy sense; instead they carry ``deployment_id``
+    directly so we can fan them out to SSE subscribers without a DB
+    lookup.
+    """
+    deployment_id = event.get('deployment_id')
+    if not deployment_id:
+        return
+    # Always forward to any live subscriber first — ephemeral
+    # data shouldn't wait for the DB write.
+    pubsub.publish(deployment_id, event)
+
+    # For progress events also persist the latest phase /
+    # percent on the active task so a reload of the detail
+    # view after a reconnect shows where things stand without
+    # having to wait for the next event.
+    if event.get('type') == 'task-progress':
+        _update_task_progress(deployment_id, event)
+
+
+def _handle_task_started(celery_task_id: str) -> dict:
+    """Build the update payload for a ``task-started`` lifecycle event."""
+    logger.info(f"Task {celery_task_id} started")
+    return {
+        "status": TaskStatus.RUNNING,
+        "started_at": utcnow()
+    }
+
+
+def _handle_task_succeeded(celery_task_id: str) -> tuple[dict, Any]:
+    """Build the update payload for a ``task-succeeded`` event.
+
+    Pulls the full result payload from the result backend and
+    normalizes logs / tf_state / outputs into the DB column shapes.
+    Returns the update dict plus the raw ``outputs`` value so the
+    orchestrator can hand it to the deploy notifier without re-fetching.
+    """
+    logger.info(f"Task {celery_task_id} succeeded")
+
+    # Pull the FULL result payload from the result backend.
+    async_result = AsyncResult(celery_task_id, app=celery_app)
+    result = async_result.result
+
+    if isinstance(result, dict):
+        logs_data = result.get('logs')
+        tf_state = result.get('tf_state')
+        outputs = result.get('terraform_outputs')
+    else:
+        logs_data = None
+        tf_state = None
+        outputs = None
+
+    # ``logs_data`` is either already a string or a list of lines.
+    if isinstance(logs_data, list):
+        logs_str = json.dumps(logs_data, ensure_ascii=False)
+    elif isinstance(logs_data, str):
+        logs_str = logs_data
+    else:
+        logs_str = None
+
+    update_data = {
+        "status": TaskStatus.SUCCESS,
+        "finished_at": utcnow(),
+        "logs": logs_str,
+        "tf_state": tf_state if isinstance(tf_state, str) else json.dumps(tf_state) if tf_state else None,
+        "outputs": outputs if isinstance(outputs, str) else json.dumps(outputs) if outputs else None,
+    }
+    return update_data, outputs
+
+
+def _parse_structured_failure(exception_type: Any, traceback: str) -> dict | None:
+    """Extract the worker's structured ``Failure`` JSON payload, if present.
+
+    The worker raises ``Failure`` (see worker/app/tasks.py) whose
+    ``args[0]`` is a JSON payload with logs/tf_state/etc. There are two
+    surface forms depending on whether Celery picks up the exception
+    cleanly:
+
+     1. clean pickle round-trip (preferred path):
+        ``Failure: {"error": ..., ...}`` in the traceback's final line,
+        AND ``Failure('{"error": ...}')`` in ``event['exception']``
+        (Celery uses ``safe_repr``).
+     2. legacy ``UnpickleableExceptionWrapper`` path (before Failure had
+        ``__reduce__``): ``Failure('...')`` literally inside the traceback.
+
+    Match both. Search the exception field first because it's a short,
+    well-defined string; fall back to the full traceback. Returns the
+    decoded dict, or ``None`` when no structured payload could be parsed.
+    """
+    candidates = [str(exception_type or ''), traceback or '']
+    for haystack in candidates:
+        if not haystack:
+            continue
+        # Form 1a: Failure('<json>')  — repr() / wrapper output
+        # Form 1b: Failure: <json>    — format_exception output
+        match = (
+            re.search(r"Failure\('(.+?)'\)", haystack, re.DOTALL)
+            or re.search(r"Failure:\s*(\{.+?\})\s*$", haystack, re.DOTALL)
+        )
+        if not match:
+            continue
+        json_str = match.group(1)
+        try:
+            return json.loads(json_str)
+        except json.JSONDecodeError:
+            # Form 1a wraps the JSON in repr(), so embedded
+            # quotes are backslash-escaped. Decode once.
+            try:
+                return json.loads(
+                    json_str.encode('utf-8').decode('unicode_escape')
+                )
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                continue
+    return None
+
+
+def _apply_structured_failure(update_data: dict, failure_data: dict) -> None:
+    """Fold the parsed worker ``Failure`` payload into ``update_data``.
+
+    Mutates ``update_data`` in place: normalizes logs, appends the error
+    line and optional commit info, and copies tf_state / terraform_outputs.
+    """
+    # logs
+    logs_data = failure_data.get('logs')
+    if logs_data is not None:
+        update_data['logs'] = json.dumps(logs_data) if isinstance(logs_data, list) else str(logs_data)
+    # error
+    if 'error' in failure_data:
+        current_logs = update_data.get('logs', '') or ''
+        update_data['logs'] = current_logs + f"\n\n[err] Error: {failure_data['error']}"
+    # tf_state
+    if 'tf_state' in failure_data:
+        update_data['tf_state'] = failure_data['tf_state']
+    # commit_info
+    if 'commit_info' in failure_data and failure_data['commit_info']:
+        commit = failure_data['commit_info']
+        if isinstance(commit, dict):
+            commit_str = f"\nCommit: {commit.get('hash', 'N/A')[:8]}"
+            commit_str += f"\n   Message: {commit.get('message', 'N/A')}"
+            commit_str += f"\n   Author: {commit.get('author', 'N/A')}"
+            current_logs = update_data.get('logs', '') or ''
+            update_data['logs'] = current_logs + commit_str
+    # terraform_outputs
+    if 'terraform_outputs' in failure_data:
+        tf_outputs = failure_data['terraform_outputs']
+        if isinstance(tf_outputs, dict):
+            update_data['outputs'] = json.dumps(tf_outputs, indent=2)
+        else:
+            update_data['outputs'] = str(tf_outputs)
+
+
+def _apply_infra_failure(
+    update_data: dict, exception_type: Any, traceback: str
+) -> str | None:
+    """Render an infrastructure-level failure into ``update_data['logs']``.
+
+    No structured ``Failure(...)`` payload — this is almost always a
+    Celery-side infrastructure error (worker doesn't know the task name,
+    worker died mid-task, broker timeout, etc.). The raw
+    ``exception_type`` would be a confusing thing to show the end user
+    (it's a Python repr with a stack trace). Translate the common ones
+    into a short operator-friendly headline; keep the raw text in the
+    same field, but separated by a marker the frontend can split on.
+    Returns the classified ``failure_kind`` (or ``None``) so it can flow
+    to the SSE pubsub event.
+    """
+    headline, kind = _translate_celery_infra_exception(
+        str(exception_type or '')
+    )
+    raw_block = f"{exception_type}\n{traceback}".strip()
+    if headline:
+        # Two newlines + a divider so the frontend
+        # split can find the boundary deterministically.
+        update_data['logs'] = (
+            f"{headline}\n\n"
+            f"--- Technische Details ---\n{raw_block}"
+        )
+    else:
+        update_data['logs'] = f"Task failed: {raw_block}"
+    return kind
+
+
+def _handle_task_failed(celery_task_id: str, event: dict) -> tuple[dict, str | None]:
+    """Build the update payload for a ``task-failed`` event.
+
+    Classifies the failure (structured ``worker_failure`` vs.
+    ``celery_infrastructure``) and returns the update dict plus the
+    ``failure_kind`` token for the SSE pubsub event.
+    """
+    logger.info(f"Task {celery_task_id} failed")
+    exception_type = event.get('exception', 'Unknown error')
+    traceback = event.get('traceback', '')
+    update_data = {
+        "status": TaskStatus.FAILED,
+        "finished_at": utcnow(),
+        "logs": None,
+        "tf_state": None,
+        "outputs": None,
+    }
+    failure_kind: str | None = None
+    try:
+        failure_data = _parse_structured_failure(exception_type, traceback)
+        if failure_data is not None:
+            # Structured worker-side failure (terraform
+            # apply broke, packer build failed, etc.).
+            failure_kind = "worker_failure"
+            _apply_structured_failure(update_data, failure_data)
+            logger.info(f"[FAILED] Extracted structured failure data for {celery_task_id}: {update_data}")
+        else:
+            raise ValueError("Not structured failure format")
+    except Exception as parse_error:
+        logger.warning(f"Could not parse structured failure: {parse_error}")
+        # ``failure_kind`` flows to the SSE pubsub event below so the UI
+        # knows whether to surface a "deployment failed" or a
+        # "worker mismatch" message.
+        failure_kind = _apply_infra_failure(update_data, exception_type, traceback)
+    logger.info(f"[FAILED] Update data for {celery_task_id}: {update_data}")
+    return update_data, failure_kind
+
+
+def _handle_task_revoked(celery_task_id: str) -> dict:
+    """Build the update payload for a ``task-revoked`` lifecycle event."""
+    logger.info(f"Task {celery_task_id} revoked")
+    return {
+        "status": TaskStatus.CANCELLED,
+        "finished_at": utcnow()
+    }
+
+
+def _auto_soft_delete_on_destroy(db: Session, task) -> None:
+    """Soft-delete the deployment after a successful destroy.
+
+    A successful destroy means the OpenStack resources are gone —
+    keeping the deployment in the active list would just leave a ghost
+    row with nothing to operate on. Soft-deleting it here unifies
+    "destroy + remove from UI" into one user action while preserving the
+    audit trail (the row plus all its tasks/logs survive in the DB, just
+    hidden from the default queries).
+    """
+    try:
+        crud_deployments.soft_delete_deployment(db, task.deploymentId)
+        logger.info(
+            f"Auto-soft-deleted deployment {task.deploymentId} after successful destroy"
+        )
+    except Exception as e:
+        # Don't let a failed soft-delete bury the success
+        # event itself — the user can still trigger the
+        # standalone Delete action from the UI.
+        logger.error(
+            f"Auto-soft-delete failed for deployment {task.deploymentId}: {e}"
+        )
+
+
+def _notify_deploy_succeeded(db: Session, task, outputs: Any) -> None:
+    """Send the success notification mail for a completed deploy.
+
+    ``outputs`` was already pulled out of the AsyncResult in the
+    task-succeeded branch above; reuse that dict instead of re-fetching.
+    The notifier handles its own errors and won't bubble up — a flaky
+    SMTP or missing creds must never tank the deploy itself.
+    """
+    try:
+        deployment_notifier.notify_deployment_succeeded(
+            db,
+            task.deploymentId,
+            terraform_outputs=outputs if isinstance(outputs, dict) else None,
+        )
+    except Exception as e:
+        logger.warning(
+            f"Deployment notify failed for {task.deploymentId}: {e}"
+        )
+
+
+def _publish_lifecycle_transition(
+    task, event_type: str, failure_kind: str | None
+) -> None:
+    """Notify open SSE subscribers about a lifecycle transition.
+
+    So they can close their stream and trigger the frontend's
+    static-log render. Without this, ``stream_deployment_events`` waits
+    forever on its queue and the page sits on the progress bar even
+    after the task finished.
+    """
+    pubsub_payload: dict[str, Any] = {
+        "type": event_type,
+        "deployment_id": str(task.deploymentId),
+        "task_id": str(task.taskId),
+        "task_type": task.type.value if task.type else None,
+        "status": (
+            "success" if event_type == 'task-succeeded'
+            else "failed" if event_type == 'task-failed'
+            else "cancelled"
+        ),
+    }
+    # Only attach ``failure_kind`` on task-failed and only
+    # if we managed to classify it — frontends can treat
+    # missing/None as "deployment-level worker failure"
+    # for backwards compat.
+    if event_type == 'task-failed' and failure_kind:
+        pubsub_payload["failure_kind"] = failure_kind
+    pubsub.publish(str(task.deploymentId), pubsub_payload)
+
+
+def _handle_lifecycle_event(event: dict, event_type: str, celery_task_id: str) -> None:
+    """Process a lifecycle event: update the task row + post-update side-effects.
+
+    Looks up the task by ``celery_task_id``, dispatches to the per-event
+    builder to compute the update payload, then applies the shared
+    side-effects (DB update, auto-soft-delete, deploy notify, pubsub) in
+    the exact order the previous inline implementation used.
+    """
+    db: Session = SessionLocal()
+    try:
+        # Find task by celery_task_id
+        tasks = crud_tasks.get_tasks(db, celery_task_id=celery_task_id)
+        if not tasks:
+            logger.warning(f"Task not found for celery_task_id: {celery_task_id}")
+            return
+
+        task = tasks[0]
+        update_data: dict = {}
+        # Pre-initialise so the notify hook below can read it
+        # regardless of which branch ran. The task-succeeded branch
+        # overwrites this with the worker's actual return payload.
+        outputs: Any = None
+        # Classification of a task-failed event so the SSE pubsub
+        # event can carry it through to the frontend without a
+        # second DB roundtrip:
+        #   * ``worker_failure`` — the worker raised a structured
+        #     ``Failure(...)`` (deploy/destroy/pause/resume code
+        #     hit a real error condition like terraform apply
+        #     failure).
+        #   * ``celery_infrastructure`` — a Celery / broker-level
+        #     issue: the worker doesn't know the task name
+        #     (NotRegistered), the worker process died
+        #     (WorkerLostError), the message timed out, etc.
+        #     Surfacing these as "deployment failed" is misleading
+        #     because the deployment itself wasn't even touched.
+        failure_kind: str | None = None
+
+        # Handle different event types
+        if event_type == 'task-started':
+            update_data = _handle_task_started(celery_task_id)
+        elif event_type == 'task-succeeded':
+            update_data, outputs = _handle_task_succeeded(celery_task_id)
+        elif event_type == 'task-failed':
+            update_data, failure_kind = _handle_task_failed(celery_task_id, event)
+        elif event_type == 'task-revoked':
+            update_data = _handle_task_revoked(celery_task_id)
+
+        # Update task in database
+        if update_data:
+            crud_tasks.update_task(db, task.taskId, update_data)
+            logger.info(f"Updated task {task.taskId} from event {event_type}")
+
+        if event_type == 'task-succeeded' and task.type == TaskType.DESTROY:
+            _auto_soft_delete_on_destroy(db, task)
+
+        if event_type == 'task-succeeded' and task.type == TaskType.DEPLOY:
+            _notify_deploy_succeeded(db, task, outputs)
+
+        if event_type in ('task-succeeded', 'task-failed', 'task-revoked'):
+            _publish_lifecycle_transition(task, event_type, failure_kind)
+
+    except Exception as e:
+        logger.error(f"Error processing event {event_type} for task {celery_task_id}: {e}")
+
+    finally:
+        db.close()
+
+
 def start_event_listener():
     """
     Start listening to Celery events from RabbitMQ
@@ -216,357 +632,20 @@ def start_event_listener():
     """
     logger.info("Starting Celery event listener...")
 
-    def _update_task_progress(deployment_id: str, event: dict) -> None:
-        """Persist phase / progress columns for the active deploy task.
-
-        Best-effort: we look up the most recent active task on the
-        deployment (status running/pending) and update two cheap
-        columns. Failures here are logged at debug-level — the live
-        SSE stream is the source-of-truth for users actively watching;
-        the DB columns are only the fallback for users opening the
-        page later.
-        """
-        db: Session = SessionLocal()
-        try:
-            tasks = crud_tasks.get_tasks(db, deployment_id=deployment_id)
-            # Pick the latest task that is still in flight; created_at
-            # ordering matches the listener's own `task-started` write.
-            active = next(
-                (
-                    t
-                    for t in sorted(tasks, key=lambda x: x.created_at, reverse=True)
-                    if t.status in (TaskStatus.RUNNING, TaskStatus.PENDING)
-                ),
-                None,
-            )
-            if active is None:
-                return
-            update: dict = {}
-            phase = event.get('phase')
-            pct = event.get('progress_pct')
-            if phase is not None:
-                update['current_phase'] = phase
-            if pct is not None:
-                # Clamp defensively — the worker sends 0..100 already.
-                update['progress_pct'] = max(0, min(100, int(pct)))
-            if update:
-                crud_tasks.update_task(db, active.taskId, update)
-        except Exception as e:
-            logger.debug(f"Could not persist progress for {deployment_id}: {e}")
-        finally:
-            db.close()
-
     def handle_event(event):
         """Process incoming Celery events"""
         event_type = event.get('type')
         celery_task_id = event.get('uuid')
 
         # ----- Custom events from the worker (live progress/logs) -----
-        # These are emitted via ``self.send_event(...)`` from inside the
-        # deploy task. They don't have a one-to-one mapping to a
-        # ``tasks`` DB row in the legacy sense; instead they carry
-        # ``deployment_id`` directly so we can fan them out to SSE
-        # subscribers without a DB lookup.
         if event_type in ('task-progress', 'task-log'):
-            deployment_id = event.get('deployment_id')
-            if not deployment_id:
-                return
-            # Always forward to any live subscriber first — ephemeral
-            # data shouldn't wait for the DB write.
-            pubsub.publish(deployment_id, event)
-
-            # For progress events also persist the latest phase /
-            # percent on the active task so a reload of the detail
-            # view after a reconnect shows where things stand without
-            # having to wait for the next event.
-            if event_type == 'task-progress':
-                _update_task_progress(deployment_id, event)
+            _handle_custom_event(event)
             return
 
         if not celery_task_id:
             return
 
-        db: Session = SessionLocal()
-        try:
-            # Find task by celery_task_id
-            tasks = crud_tasks.get_tasks(db, celery_task_id=celery_task_id)
-            if not tasks:
-                logger.warning(f"Task not found for celery_task_id: {celery_task_id}")
-                return
-
-            task = tasks[0]
-            update_data = {}
-            # Pre-initialise so the notify hook below can read it
-            # regardless of which branch ran. The task-succeeded branch
-            # overwrites this with the worker's actual return payload.
-            outputs: Any = None
-            # Classification of a task-failed event so the SSE pubsub
-            # event can carry it through to the frontend without a
-            # second DB roundtrip:
-            #   * ``worker_failure`` — the worker raised a structured
-            #     ``Failure(...)`` (deploy/destroy/pause/resume code
-            #     hit a real error condition like terraform apply
-            #     failure).
-            #   * ``celery_infrastructure`` — a Celery / broker-level
-            #     issue: the worker doesn't know the task name
-            #     (NotRegistered), the worker process died
-            #     (WorkerLostError), the message timed out, etc.
-            #     Surfacing these as "deployment failed" is misleading
-            #     because the deployment itself wasn't even touched.
-            failure_kind: str | None = None
-            outputs: Any = None
-
-            # Handle different event types
-            if event_type == 'task-started':
-                logger.info(f"Task {celery_task_id} started")
-                update_data = {
-                    "status": TaskStatus.RUNNING,
-                    "started_at": datetime.utcnow()
-                }
-
-            elif event_type == 'task-succeeded':
-                logger.info(f"Task {celery_task_id} succeeded")
-
-                # Hole das VOLLSTÄNDIGE Result vom Backend
-                async_result = AsyncResult(celery_task_id, app=celery_app)
-                result = async_result.result  # ← Hier ist das vollständige Result!
-                print(f"DEBUG: result type: {type(result)}")
-                print(f"DEBUG: result: {result}")
-
-                # Jetzt kannst du damit arbeiten
-                if isinstance(result, dict):
-                    logs_data = result.get('logs')
-                    tf_state = result.get('tf_state')
-                    outputs = result.get('terraform_outputs')
-                    print(f"DEBUG: logs_data type: {type(logs_data)}, len: {len(logs_data) if logs_data else 'None'}")
-                    print(f"DEBUG: tf_state type: {type(tf_state)}, len: {len(tf_state) if tf_state else 'None'}")
-                    print(f"DEBUG: outputs type: {type(outputs)}, keys: {list(outputs.keys()) if outputs else 'None'}")
-                else:
-                    logs_data = None
-                    tf_state = None
-                    outputs = None
-                    print("DEBUG: result is not a dict!")
-
-                # Logs sind jetzt entweder schon ein String oder ein List
-                if isinstance(logs_data, list):
-                    logs_str = json.dumps(logs_data, ensure_ascii=False)
-                elif isinstance(logs_data, str):
-                    logs_str = logs_data
-                else:
-                    logs_str = None
-
-                update_data = {
-                    "status": TaskStatus.SUCCESS,
-                    "finished_at": datetime.utcnow(),
-                    "logs": logs_str,
-                    "tf_state": tf_state if isinstance(tf_state, str) else json.dumps(tf_state) if tf_state else None,
-                    "outputs": outputs if isinstance(outputs, str) else json.dumps(outputs) if outputs else None,
-                }
-
-            elif event_type == 'task-failed':
-                logger.info(f"Task {celery_task_id} failed")
-                exception_type = event.get('exception', 'Unknown error')
-                traceback = event.get('traceback', '')
-                update_data = {
-                    "status": TaskStatus.FAILED,
-                    "finished_at": datetime.utcnow(),
-                    "logs": None,
-                    "tf_state": None,
-                    "outputs": None,
-                }
-                # Try to extract structured failure data.
-                #
-                # The worker raises ``Failure`` (see worker/app/tasks.py) whose
-                # ``args[0]`` is a JSON payload with logs/tf_state/etc. There
-                # are two surface forms depending on whether Celery picks up
-                # the exception cleanly:
-                #
-                #  1. clean pickle round-trip (preferred path):
-                #     ``Failure: {"error": ..., ...}`` in the traceback's
-                #     final line, AND ``Failure('{"error": ...}')`` in
-                #     ``event['exception']`` (Celery uses ``safe_repr``).
-                #  2. legacy ``UnpickleableExceptionWrapper`` path (before
-                #     Failure had ``__reduce__``): ``Failure('...')``
-                #     literally inside the traceback.
-                #
-                # Match both. Search the exception field first because it's a
-                # short, well-defined string; fall back to the full traceback.
-                try:
-                    import re
-                    candidates = [str(exception_type or ''), traceback or '']
-                    failure_data = None
-                    for haystack in candidates:
-                        if not haystack:
-                            continue
-                        # Form 1a: Failure('<json>')  — repr() / wrapper output
-                        # Form 1b: Failure: <json>    — format_exception output
-                        match = (
-                            re.search(r"Failure\('(.+?)'\)", haystack, re.DOTALL)
-                            or re.search(r"Failure:\s*(\{.+?\})\s*$", haystack, re.DOTALL)
-                        )
-                        if not match:
-                            continue
-                        json_str = match.group(1)
-                        try:
-                            failure_data = json.loads(json_str)
-                        except json.JSONDecodeError:
-                            # Form 1a wraps the JSON in repr(), so embedded
-                            # quotes are backslash-escaped. Decode once.
-                            try:
-                                failure_data = json.loads(
-                                    json_str.encode('utf-8').decode('unicode_escape')
-                                )
-                            except (json.JSONDecodeError, UnicodeDecodeError):
-                                continue
-                        break
-
-                    if failure_data is not None:
-                        # Structured worker-side failure (terraform
-                        # apply broke, packer build failed, etc.).
-                        failure_kind = "worker_failure"
-                        # logs
-                        logs_data = failure_data.get('logs')
-                        if logs_data is not None:
-                            update_data['logs'] = json.dumps(logs_data) if isinstance(logs_data, list) else str(logs_data)
-                        # error
-                        if 'error' in failure_data:
-                            current_logs = update_data.get('logs', '') or ''
-                            update_data['logs'] = current_logs + f"\n\n[err] Error: {failure_data['error']}"
-                        # tf_state
-                        if 'tf_state' in failure_data:
-                            update_data['tf_state'] = failure_data['tf_state']
-                        # commit_info
-                        if 'commit_info' in failure_data and failure_data['commit_info']:
-                            commit = failure_data['commit_info']
-                            if isinstance(commit, dict):
-                                commit_str = f"\nCommit: {commit.get('hash', 'N/A')[:8]}"
-                                commit_str += f"\n   Message: {commit.get('message', 'N/A')}"
-                                commit_str += f"\n   Author: {commit.get('author', 'N/A')}"
-                                current_logs = update_data.get('logs', '') or ''
-                                update_data['logs'] = current_logs + commit_str
-                        # terraform_outputs
-                        if 'terraform_outputs' in failure_data:
-                            tf_outputs = failure_data['terraform_outputs']
-                            if isinstance(tf_outputs, dict):
-                                update_data['outputs'] = json.dumps(tf_outputs, indent=2)
-                            else:
-                                update_data['outputs'] = str(tf_outputs)
-                        logger.info(f"[FAILED] Extracted structured failure data for {celery_task_id}: {update_data}")
-                    else:
-                        raise ValueError("Not structured failure format")
-                except Exception as parse_error:
-                    logger.warning(f"Could not parse structured failure: {parse_error}")
-                    # No structured ``Failure(...)`` payload — this is
-                    # almost always a Celery-side infrastructure error
-                    # (worker doesn't know the task name, worker died
-                    # mid-task, broker timeout, etc.). The raw
-                    # ``exception_type`` would be a confusing thing to
-                    # show the end user (it's a Python repr with a
-                    # stack trace). Translate the common ones into a
-                    # short operator-friendly headline; keep the raw
-                    # text in the same field, but separated by a marker
-                    # the frontend can split on. ``failure_kind`` flows
-                    # to the SSE pubsub event below so the UI knows
-                    # whether to surface a "deployment failed" or a
-                    # "worker mismatch" message.
-                    headline, kind = _translate_celery_infra_exception(
-                        str(exception_type or '')
-                    )
-                    raw_block = f"{exception_type}\n{traceback}".strip()
-                    if headline:
-                        # Two newlines + a divider so the frontend
-                        # split can find the boundary deterministically.
-                        update_data['logs'] = (
-                            f"{headline}\n\n"
-                            f"--- Technische Details ---\n{raw_block}"
-                        )
-                    else:
-                        update_data['logs'] = f"Task failed: {raw_block}"
-                    failure_kind = kind
-                logger.info(f"[FAILED] Update data for {celery_task_id}: {update_data}")
-
-            elif event_type == 'task-revoked':
-                logger.info(f"Task {celery_task_id} revoked")
-                update_data = {
-                    "status": TaskStatus.CANCELLED,
-                    "finished_at": datetime.utcnow()
-                }
-
-            # Update task in database
-            if update_data:
-                crud_tasks.update_task(db, task.taskId, update_data)
-                logger.info(f"Updated task {task.taskId} from event {event_type}")
-
-            # Auto-soft-delete on successful destroy. A successful
-            # destroy means the OpenStack resources are gone — keeping
-            # the deployment in the active list would just leave a
-            # ghost row with nothing to operate on. Soft-deleting it
-            # here unifies "destroy + remove from UI" into one user
-            # action while preserving the audit trail (the row plus all
-            # its tasks/logs survive in the DB, just hidden from the
-            # default queries).
-            if event_type == 'task-succeeded' and task.type == TaskType.DESTROY:
-                try:
-                    crud_deployments.soft_delete_deployment(db, task.deploymentId)
-                    logger.info(
-                        f"Auto-soft-deleted deployment {task.deploymentId} after successful destroy"
-                    )
-                except Exception as e:
-                    # Don't let a failed soft-delete bury the success
-                    # event itself — the user can still trigger the
-                    # standalone Delete action from the UI.
-                    logger.error(
-                        f"Auto-soft-delete failed for deployment {task.deploymentId}: {e}"
-                    )
-
-            # Notification mails on successful deploy. ``outputs`` was
-            # already pulled out of the AsyncResult in the
-            # task-succeeded branch above; reuse that dict instead of
-            # re-fetching. The notifier handles its own errors and
-            # won't bubble up — a flaky SMTP or missing creds must
-            # never tank the deploy itself.
-            if event_type == 'task-succeeded' and task.type == TaskType.DEPLOY:
-                try:
-                    deployment_notifier.notify_deployment_succeeded(
-                        db,
-                        task.deploymentId,
-                        terraform_outputs=outputs if isinstance(outputs, dict) else None,
-                    )
-                except Exception as e:
-                    logger.warning(
-                        f"Deployment notify failed for {task.deploymentId}: {e}"
-                    )
-
-            # Notify any open SSE subscribers about lifecycle transitions
-            # so they can close their stream and trigger the frontend's
-            # static-log render. Without this, ``stream_deployment_events``
-            # waits forever on its queue and the page sits on the
-            # progress bar even after the task finished.
-            if event_type in ('task-succeeded', 'task-failed', 'task-revoked'):
-                pubsub_payload: dict[str, Any] = {
-                    "type": event_type,
-                    "deployment_id": str(task.deploymentId),
-                    "task_id": str(task.taskId),
-                    "task_type": task.type.value if task.type else None,
-                    "status": (
-                        "success" if event_type == 'task-succeeded'
-                        else "failed" if event_type == 'task-failed'
-                        else "cancelled"
-                    ),
-                }
-                # Only attach ``failure_kind`` on task-failed and only
-                # if we managed to classify it — frontends can treat
-                # missing/None as "deployment-level worker failure"
-                # for backwards compat.
-                if event_type == 'task-failed' and failure_kind:
-                    pubsub_payload["failure_kind"] = failure_kind
-                pubsub.publish(str(task.deploymentId), pubsub_payload)
-
-        except Exception as e:
-            logger.error(f"Error processing event {event_type} for task {celery_task_id}: {e}")
-
-        finally:
-            db.close()
+        _handle_lifecycle_event(event, event_type, celery_task_id)
 
     # Connect to RabbitMQ and listen for events
     with celery_app.connection() as connection:

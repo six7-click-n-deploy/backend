@@ -14,7 +14,6 @@ The plaintext envelope MUST NOT be passed to Celery.
 from __future__ import annotations
 
 import base64
-from datetime import datetime
 from uuid import UUID
 
 from sqlalchemy.orm import Session
@@ -22,6 +21,7 @@ from sqlalchemy.orm import Session
 from app.models import UserOpenStackCredential
 from app.schemas import OpenStackCredentialUpsert
 from app.utils import crypto
+from app.utils.time import utcnow
 
 
 class NoCredentialError(Exception):
@@ -50,7 +50,7 @@ def upsert(
     record the message.
     """
     ok, error = validation_result
-    now = datetime.utcnow()
+    now = utcnow()
 
     enc_id = crypto.encrypt(payload.identifier)
     enc_secret = crypto.encrypt(payload.secret)
@@ -102,7 +102,7 @@ def stamp_validation(
     """Update validation metadata after a `/test` call without rotating ciphertext."""
     ok, error = validation_result
     if ok:
-        row.last_validated_at = datetime.utcnow()
+        row.last_validated_at = utcnow()
         row.last_validation_error = None
     else:
         row.last_validation_error = error

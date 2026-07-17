@@ -31,6 +31,22 @@ def get_teams(
     return query.offset(skip).limit(limit).all()
 
 
+def _add_team_members(db: Session, team: Team, user_ids: list[UUID]) -> None:
+    """Stage ``UserToTeam`` membership rows for ``team``.
+
+    Adds one association row per user id to the session without
+    committing or flushing — the caller controls transaction
+    boundaries. ``team.teamId`` must already be populated (via a prior
+    commit or flush) so the foreign key can be set.
+    """
+    for user_id in user_ids:
+        user_to_team = UserToTeam(
+            userId=user_id,
+            teamId=team.teamId
+        )
+        db.add(user_to_team)
+
+
 def create_team(db: Session, team: TeamCreate) -> Team:
     """Create a new team.
 
@@ -43,16 +59,13 @@ def create_team(db: Session, team: TeamCreate) -> Team:
         deploymentId=team.deploymentId
     )
     db.add(db_team)
+    # Commit the team row first so ``teamId`` is populated before staging
+    # memberships. (This keeps the historical two-commit semantics: the
+    # team row is durable independently of the membership insert.)
     db.commit()
     db.refresh(db_team)
 
-    # Add users to team
-    for user_id in team.userIds:
-        user_to_team = UserToTeam(
-            userId=user_id,
-            teamId=db_team.teamId
-        )
-        db.add(user_to_team)
+    _add_team_members(db, db_team, team.userIds)
 
     db.commit()
     db.refresh(db_team)
@@ -140,13 +153,7 @@ def create_teams_for_deployment(
         db.add(db_team)
         db.flush()  # Get team ID
 
-        # Add users to team
-        for user_id in team_data.get("userIds", []):
-            user_to_team = UserToTeam(
-                userId=user_id,
-                teamId=db_team.teamId
-            )
-            db.add(user_to_team)
+        _add_team_members(db, db_team, team_data.get("userIds", []))
 
         created_teams.append(db_team)
 
